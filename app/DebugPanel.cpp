@@ -15,6 +15,19 @@ String linearToDbString (float linear)
     return Decibels::toString (Decibels::gainToDecibels (linear), 1);
 }
 
+// ── Incremental scan-save throttle (issue #19 stopgap) ────────────────────────
+// The vblank persists the KnownPluginList mid-scan after BOTH: the known-type count
+// has grown by >= kScanSaveTypeGrowth since the last save, AND at least
+// kScanSaveMinIntervalMs has elapsed. The growth gate is 1 (bank ANY new type),
+// throttled to at most once per second: a coarser gate (e.g. 20) would defeat
+// recovery in the clustered-crasher case — if fewer than the threshold clean
+// plugins scan before each hostile one crashes the host, nothing would ever bank
+// and every relaunch re-scans the same un-persisted types into the same crash, an
+// infinite no-progress loop. At growth==1 a crash loses at most ~1 s of scanning
+// and progress always accumulates across relaunches.
+constexpr int kScanSaveTypeGrowth = 1;
+constexpr std::uint32_t kScanSaveMinIntervalMs = 1000;
+
 /** Maps a device-status level to a human-readable banner string. */
 String statusText (std::uint8_t status)
 {
@@ -169,6 +182,14 @@ void DebugPanel::startPluginScan ()
         currentScanName.clear ();
     }
 
+    // Baseline the incremental-save throttle to "now / current size" so both the
+    // growth (>= kScanSaveTypeGrowth new types) and the elapsed-time floor
+    // (kScanSaveMinIntervalMs) are measured from the start of THIS scan pass
+    // (issue #19 stopgap). getNumTypes() is internally locked — safe to read here
+    // (no worker is running yet: we start the thread below).
+    lastSavedTypeCount = pluginManager.getKnownPluginList ().getNumTypes ();
+    lastSaveTimeMs = Time::getMillisecondCounter ();
+
     scanButton.setEnabled (false);
     cancelScanButton.setEnabled (true);
     scanStatusLabel.setText ("scanning…", dontSendNotification);
@@ -318,8 +339,43 @@ void DebugPanel::refreshFromEngine ()
 
     if (scanRunning.load (std::memory_order_relaxed))
     {
-        // While a scan is in flight, show progress + the current file. Do NOT read
-        // the KnownPluginList here — the worker is mutating it.
+        // ── Incremental progress persistence (issue #19 stopgap) ─────────────
+        // Reading the type count WHILE the worker scans is safe: getNumTypes()
+        // takes KnownPluginList's internal typesArrayLock. Persist periodically so
+        // a crash mid-scan (a hostile in-process AU segfaulting the host) keeps the
+        // types accumulated so far. On the next launch restore() re-blacklists the
+        // crasher from the dead-man's-pedal and an incremental rescan skips both the
+        // already-scanned files and the blacklisted crasher, letting the user finish
+        // across relaunches. Throttled (>= kScanSaveTypeGrowth new types AND
+        // >= kScanSaveMinIntervalMs elapsed) so we never save every frame.
+        //
+        // save() → createXml() takes the same typesArrayLock for the types array,
+        // so it is safe to run concurrently with the worker's scanAndAddFile. It
+        // also reads the (unlocked) blacklist. That read is race-free today for
+        // TWO reasons, BOTH required: (1) our InProcessScanner always returns
+        // true, so scanAndAddFile never blacklists on the worker; and (2) the
+        // worker DOES call addToBlacklist at the start of each format pass
+        // (PluginDirectoryScanner's ctor re-applies the dead-man's-pedal), but
+        // Main.cpp's restore() already applied the same pedal file on this thread
+        // before any scan could start, and nothing removes blacklist entries
+        // mid-session, so those worker-side calls are guaranteed no-ops
+        // (contains() short-circuits before the mutating add). If either
+        // invariant breaks — e.g. Phase 20's user-overridable blocklist removing
+        // an id whose entry is still in the pedal file — this mid-scan save
+        // becomes a data race on the blacklist and must be re-gated.
+        const int liveCount = pluginManager.getKnownPluginList ().getNumTypes ();
+        const std::uint32_t nowMs = Time::getMillisecondCounter ();
+
+        if (liveCount - lastSavedTypeCount >= kScanSaveTypeGrowth
+            && nowMs - lastSaveTimeMs >= kScanSaveMinIntervalMs)
+        {
+            pluginManager.save ();
+            lastSavedTypeCount = liveCount;
+            lastSaveTimeMs = nowMs;
+        }
+
+        // Show progress + the current file, plus the live (accumulating) count so
+        // the user can watch progress being banked.
         String name;
         {
             const ScopedLock sl (scanNameLock);
@@ -329,12 +385,19 @@ void DebugPanel::refreshFromEngine ()
                                      + String (roundToInt (scanProgress.load (std::memory_order_relaxed) * 100.0f))
                                      + "%   " + name,
                                  dontSendNotification);
+        pluginCountLabel.setText ("known plugins: " + String (liveCount) + " (scanning…)",
+                                  dontSendNotification);
     }
     else
     {
-        // No worker mutating the list => safe to read the live count (confirms a
-        // restore-across-launches without any scan).
-        pluginCountLabel.setText ("known plugins: " + String (pluginManager.getKnownPluginList ().getNumTypes ()),
+        // No worker running => safe to read the live count AND the blacklist. Show
+        // the quarantined count next to the type count so the user can see what the
+        // dead-man's-pedal blacklisted after a crash-recovery relaunch, and that
+        // progress is accumulating (issue #19 stopgap). getBlacklistedFiles()
+        // returns a raw, unlocked reference, so only read it off-scan like this.
+        const auto& list = pluginManager.getKnownPluginList ();
+        pluginCountLabel.setText ("known plugins: " + String (list.getNumTypes ())
+                                      + "   quarantined: " + String (list.getBlacklistedFiles ().size ()),
                                   dontSendNotification);
     }
 }

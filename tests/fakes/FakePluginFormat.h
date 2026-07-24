@@ -19,6 +19,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <map>
 #include <vector>
 
 namespace arpbox::testing
@@ -68,6 +69,21 @@ public:
         return false;
     }
 
+    // ── Load/instantiate instrumentation (test-only, not part of the format API) ─
+    // The "was I actually loaded?" probe for the crash-recovery regression tests.
+    // A blacklisted identifier must be skipped by KnownPluginList::scanAndAddFile
+    // BEFORE the format is ever consulted, so its findAllTypesForFile counter must
+    // stay at zero — that is the "no re-crash" guarantee. These maps are written on
+    // the scanning/message thread and read by the test after the (single-threaded,
+    // pumped) work completes; a CriticalSection guards them defensively. NOT audio
+    // thread, NOT RT-relevant.
+
+    /** How many times findAllTypesForFile (the scan-time load) ran for `identifier`. */
+    int getFindAllTypesCallCount (const juce::String& identifier) const;
+
+    /** How many times createPluginInstance (the instantiate-time load) ran for it. */
+    int getCreateInstanceCallCount (const juce::String& identifier) const;
+
 protected:
     // ── Instantiation ──────────────────────────────────────────────────────────
     /** Message-thread creation (per the JUCE contract). Maps the description's
@@ -84,6 +100,11 @@ private:
     const FakeSpec* findSpecByIdentifier (const juce::String& identifier) const;
 
     std::vector<FakeSpec> specs;
+
+    // Per-identifier load-invocation tallies (see the probe getters above).
+    juce::CriticalSection callCountLock;
+    std::map<juce::String, int> findAllTypesCalls;
+    std::map<juce::String, int> createInstanceCalls;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FakePluginFormat)
 };

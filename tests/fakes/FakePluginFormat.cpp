@@ -23,9 +23,31 @@ const FakeSpec* FakePluginFormat::findSpecByIdentifier (const String& identifier
     return nullptr;
 }
 
+int FakePluginFormat::getFindAllTypesCallCount (const String& identifier) const
+{
+    const ScopedLock sl (callCountLock);
+    const auto it = findAllTypesCalls.find (identifier);
+    return it != findAllTypesCalls.end () ? it->second : 0;
+}
+
+int FakePluginFormat::getCreateInstanceCallCount (const String& identifier) const
+{
+    const ScopedLock sl (callCountLock);
+    const auto it = createInstanceCalls.find (identifier);
+    return it != createInstanceCalls.end () ? it->second : 0;
+}
+
 void FakePluginFormat::findAllTypesForFile (OwnedArray<PluginDescription>& results,
                                             const String& fileOrIdentifier)
 {
+    // Record the scan-time load attempt. A blacklisted identifier never reaches
+    // here (scanAndAddFile short-circuits on the blacklist), which is exactly what
+    // the crash-recovery regression asserts.
+    {
+        const ScopedLock sl (callCountLock);
+        ++findAllTypesCalls[fileOrIdentifier];
+    }
+
     const auto* spec = findSpecByIdentifier (fileOrIdentifier);
 
     // Unknown identifier, or the crash-on-scan offender: yield NO type. For the
@@ -72,6 +94,12 @@ void FakePluginFormat::createPluginInstance (const PluginDescription& descriptio
                                              int initialBufferSize,
                                              PluginCreationCallback callback)
 {
+    // Record the instantiate-time load attempt (companion to the scan-time probe).
+    {
+        const ScopedLock sl (callCountLock);
+        ++createInstanceCalls[description.fileOrIdentifier];
+    }
+
     const auto* spec = findSpecByIdentifier (description.fileOrIdentifier);
 
     if (spec == nullptr)

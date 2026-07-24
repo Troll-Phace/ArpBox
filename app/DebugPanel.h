@@ -103,6 +103,14 @@ private:
     std::uint64_t engineEventCount = 0; ///< Total engine events drained since launch.
     juce::String lastEventText { "none" };
 
+    // ── Incremental scan-progress persistence (issue #19 stopgap) ────────────
+    // MESSAGE-THREAD ONLY throttle state for the periodic save() the vblank runs
+    // WHILE a scan is in flight, so a crash mid-scan (hostile in-process AU)
+    // preserves the types accumulated so far across a relaunch. Only ever touched
+    // on the message thread (startPluginScan + the vblank refresh), so no atomics.
+    int lastSavedTypeCount = 0;        ///< Known-type count at the last periodic save.
+    std::uint32_t lastSaveTimeMs = 0;  ///< Time::getMillisecondCounter() at the last periodic save.
+
     // ── Background plugin scan (DEV-ONLY) ────────────────────────────────────
     // scanAll() BLOCKS, so it runs on this worker thread, NEVER the message thread.
     // Cooperative-cancel via threadShouldExit() (the scan's cancel predicate);

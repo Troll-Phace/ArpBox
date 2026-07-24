@@ -63,6 +63,9 @@ add_executable(arpbox_tests
     fakes/HostingLabSupport.h
     hosting_scan.cpp
     hosting_instantiate.cpp
+    # Issue #19 in-process-scan crash-recovery stopgap: dead-man's-pedal blacklist,
+    # blacklist persistence round-trip, and incremental-resume skip (headless).
+    hosting_crash_recovery.cpp
     # Regression guard: the REAL production format registration helper actually
     # registers VST3 + AudioUnit (guards the Phase 3 "0 formats" host-flag bug).
     hosting_formats.cpp)
