@@ -13,10 +13,12 @@
 #include "engine/graph/EngineCommand.h"
 #include "engine/graph/EngineGraph.h"
 #include "engine/graph/EngineSnapshot.h"
+#include "engine/graph/MasterProcessor.h"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <limits>
 
 using arpbox::engine::EngineCommand;
 using arpbox::engine::EngineCommandType;
@@ -199,6 +201,57 @@ TEST_CASE ("graph/engine-graph: master output reaches the graph OUTPUT buffer (a
     // in the mid-graph Master meter. A disconnected audioOutput leaves this at 0.
     REQUIRE (outputPeak > 0.0f);
     REQUIRE (outputPeak <= 1.0001f); // safety limiter keeps it inside the ceiling
+}
+
+TEST_CASE ("graph/master: recovers from a NaN/Inf input block (limiter not poisoned)", "[unit]")
+{
+    // REGRESSION (issue #3): a single non-finite INPUT sample poisons dsp::Limiter's
+    // ballistics. With only the post-limiter scrub, the master would then emit NaN
+    // forever (the downstream scrub zeros it) → PERMANENT silence until re-prepare.
+    // The input-boundary scrub must keep the limiter clean so finite, non-silent
+    // output resumes on the very next clean block. Driven on a standalone
+    // MasterProcessor (no shared state) so a NaN block can be injected at its input —
+    // through the graph, the master's input source is always finite.
+    arpbox::engine::MasterProcessor master;
+    master.setPlayConfigDetails (2, 2, 48000.0, 128);
+    master.prepareToPlay (48000.0, 128);
+
+    juce::AudioBuffer<float> buffer (2, 128);
+    juce::MidiBuffer midi;
+
+    // 1. Hostile input: a full block of NaN / ±Inf (a buggy synth's output).
+    buffer.clear ();
+    for (int ch = 0; ch < buffer.getNumChannels (); ++ch)
+    {
+        float* const d = buffer.getWritePointer (ch);
+        for (int s = 0; s < buffer.getNumSamples (); ++s)
+            d[s] = (s % 3 == 0) ? std::numeric_limits<float>::quiet_NaN ()
+                 : (s % 3 == 1) ? std::numeric_limits<float>::infinity ()
+                                : -std::numeric_limits<float>::infinity ();
+    }
+    master.processBlock (buffer, midi);
+    REQUIRE (allFinite (buffer)); // output scrub keeps the graph boundary finite
+
+    // 2. Clean, non-silent input on subsequent blocks. A poisoned limiter would keep
+    //    NaN-ing the envelope → post-scrub zeros → silence; recovery means signal.
+    float outputPeak = 0.0f;
+    for (int i = 0; i < 8; ++i)
+    {
+        buffer.clear ();
+        for (int ch = 0; ch < buffer.getNumChannels (); ++ch)
+        {
+            float* const d = buffer.getWritePointer (ch);
+            for (int s = 0; s < buffer.getNumSamples (); ++s)
+                d[s] = 0.25f; // well under the -1 dBFS limiter threshold
+        }
+        master.processBlock (buffer, midi);
+        REQUIRE (allFinite (buffer));
+        outputPeak = juce::jmax (outputPeak, buffer.getMagnitude (0, buffer.getNumSamples ()));
+    }
+
+    // The limiter recovered: the clean signal reaches the output non-silent.
+    REQUIRE (outputPeak > 0.0f);
+    REQUIRE (outputPeak <= 1.0001f);
 }
 
 TEST_CASE ("graph/engine-graph: processes at multiple block sizes without crashing", "[unit]")

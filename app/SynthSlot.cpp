@@ -1,6 +1,5 @@
 #include "SynthSlot.h"
 
-#include "AudioEngine.h"
 #include "hosting/HostedPluginNode.h"
 
 #include <utility>
@@ -10,7 +9,7 @@ namespace arpbox::app
 using namespace juce;
 
 // MESSAGE-THREAD ONLY.
-SynthSlot::SynthSlot (AudioEngine& engineToUse, AudioPluginFormatManager& formats)
+SynthSlot::SynthSlot (ISynthEngine& engineToUse, AudioPluginFormatManager& formats)
     : engine (engineToUse), instantiator (formats)
 {
 }
@@ -106,7 +105,7 @@ void SynthSlot::onInstantiated (int callbackGeneration, hosting::InstantiationRe
         engine.allNotesOff ();
         if (currentSynth != nullptr)
             currentSynth->fadeOut ();
-        state = State::awaitingFadeOut;
+        beginFadeOutWait ();
     }
 }
 
@@ -140,12 +139,19 @@ void SynthSlot::remove ()
     {
         engine.allNotesOff (); // stuck-note guard before the synth leaves.
         currentSynth->fadeOut ();
-        state = State::awaitingFadeOut; // poll() removes it once silent.
+        beginFadeOutWait (); // poll() removes it once silent (or after the bounded budget).
     }
     else
     {
         state = State::idle;
     }
+}
+
+// MESSAGE-THREAD ONLY.
+void SynthSlot::beginFadeOutWait () noexcept
+{
+    fadeOutPollsRemaining = kMaxFadeOutPolls;
+    state = State::awaitingFadeOut;
 }
 
 // MESSAGE-THREAD ONLY (UI tick — VBlankAttachment, never a juce::Timer).
@@ -177,8 +183,12 @@ void SynthSlot::poll ()
     }
 
     // Wait until the outgoing node is genuinely silent (audio-thread → us handshake),
-    // so no audible tail is chopped.
-    if (! currentSynth->isFadeOutComplete ())
+    // so no audible tail is chopped — but bound the wait (issue #24). The handshake
+    // flag only advances inside HostedPluginNode::processBlock, so if the device is
+    // stopped/dead the fade never completes; force the edit once the poll budget is
+    // spent so isPending() cannot hang forever. A running device completes the fade
+    // in 1–2 frames, far inside the budget, so click-free swaps are preserved.
+    if (! currentSynth->isFadeOutComplete () && --fadeOutPollsRemaining > 0)
         return;
 
     if (pendingNode != nullptr)

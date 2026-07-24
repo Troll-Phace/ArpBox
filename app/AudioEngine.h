@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ISynthEngine.h"
+
 #include "engine/graph/DeviceStatus.h"
 #include "engine/graph/EngineCommand.h"
 #include "engine/graph/EngineEvent.h"
@@ -49,7 +51,8 @@ namespace arpbox::app
     `collector.reset()` — that would race the audio-thread drain.
 
     MESSAGE-THREAD ONLY unless a method is explicitly marked otherwise. */
-class AudioEngine final : private juce::AudioIODeviceCallback,
+class AudioEngine final : public ISynthEngine,
+                          private juce::AudioIODeviceCallback,
                           private juce::AsyncUpdater,
                           private juce::ChangeListener,
                           private juce::MidiInputCallback
@@ -111,7 +114,7 @@ public:
 
     // MESSAGE-THREAD ONLY: request an all-notes-off flush on the MIDI-in path.
     /** Flushes held MIDI-in notes (CC123 on all channels); a swap/removal primitive. */
-    void allNotesOff () { graph.allNotesOff (); }
+    void allNotesOff () override { graph.allNotesOff (); }
 
     // MESSAGE-THREAD ONLY: set the MIDI-input channel filter (bit i ⇒ channel i+1).
     /** Sets the 16-bit MIDI-input channel mask (default all-pass). */
@@ -123,17 +126,17 @@ public:
     // instrument slot (wired MIDI-In → synth → Master). The engine takes ownership;
     // prepare the instance at getCurrentSampleRate()/getCurrentBlockSize() first.
     /** Sets/swaps the hosted synth (base `juce::AudioProcessor`). */
-    void setSynth (std::unique_ptr<juce::AudioProcessor> synth) { graph.setSynth (std::move (synth)); }
+    void setSynth (std::unique_ptr<juce::AudioProcessor> synth) override { graph.setSynth (std::move (synth)); }
 
     // MESSAGE-THREAD ONLY: removes the current synth.
     /** Removes the hosted synth from the instrument slot. */
-    void removeSynth () { graph.removeSynth (); }
+    void removeSynth () override { graph.removeSynth (); }
 
     // MESSAGE-THREAD ONLY: current graph audio config for preparing a synth instance.
     /** Current graph sample rate (Hz); 0 before the device is open. */
-    double getCurrentSampleRate () const noexcept { return graph.getSampleRate (); }
+    double getCurrentSampleRate () const noexcept override { return graph.getSampleRate (); }
     /** Current graph block size (samples); 0 before the device is open. */
-    int getCurrentBlockSize () const noexcept { return graph.getBlockSize (); }
+    int getCurrentBlockSize () const noexcept override { return graph.getBlockSize (); }
 
     // MESSAGE-THREAD ONLY: exposes the device manager for a settings UI (later
     // phases) and tests.
@@ -210,6 +213,11 @@ private:
     // MESSAGE-THREAD ONLY: rebuild the cached `deviceDescription` string.
     void refreshDeviceDescription ();
 
+    // MESSAGE-THREAD ONLY: sets the device-status LEVEL. The single writer of the
+    // status — updates the message-thread-tracked copy (`currentDeviceStatus`) AND
+    // forwards to the graph so the audio thread surfaces it in every snapshot.
+    void setDeviceStatus (engine::DeviceStatus status) noexcept;
+
     // Cross-thread device-death signalling. Set on the audio/device thread, read
     // and cleared on the message thread in handleAsyncUpdate().
     std::atomic<bool> deviceErrored { false };  ///< A genuine driver error fired.
@@ -219,9 +227,23 @@ private:
     // MESSAGE-THREAD ONLY: bounded-fallback retry state, touched only inside
     // handleAsyncUpdate(). Caps reopen churn from a persistently-failing default
     // device to kMaxFallbackAttempts attempts per kFallbackWindowMs rolling window
-    // (window-elapse is the reset). `fallbackWindowStartMs` == 0 means "no window".
+    // (window-elapse is the reset). `fallbackWindowActive` is an EXPLICIT
+    // "window open" flag (issue #11) — it replaces the old `fallbackWindowStartMs
+    // == 0` sentinel, which could collide with a legitimate zero millisecond counter
+    // (boot instant / wrap tick) and permit one extra retry burst.
     int fallbackAttemptsInWindow { 0 };
+    bool fallbackWindowActive { false };
     juce::uint32 fallbackWindowStartMs { 0 };
+
+    // MESSAGE-THREAD ONLY: current device-status LEVEL (mirror of what the graph
+    // holds), so changeListenerCallback can tell it is upgrading FROM FellBackToDefault.
+    engine::DeviceStatus currentDeviceStatus { engine::deviceStatusOk };
+
+    // MESSAGE-THREAD ONLY: name of the device the auto-fallback selected. A later
+    // device change to a DIFFERENT healthy device (a genuine user re-selection, not
+    // the fallback's own change broadcast) clears the stale FellBackToDefault banner
+    // (issue #10). Empty when no fallback has occurred.
+    juce::String fallbackDeviceName;
 
     // Cached, message-thread-only readout of the active device.
     juce::String deviceDescription { "No audio device" };

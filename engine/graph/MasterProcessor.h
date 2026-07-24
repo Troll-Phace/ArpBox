@@ -18,8 +18,9 @@ namespace arpbox::engine
 /** Master-section graph node: the last processor before the audio-output node
     (ARCHITECTURE §7). Signal chain, in order, per `processBlock`:
 
-        drain EngineCommandQueue → output gain → safety limiter (default ON)
-        → NaN/Inf scrub (graph boundary) → meter tap → publish EngineSnapshot
+        drain EngineCommandQueue → INPUT NaN/Inf scrub → output gain
+        → safety limiter (default ON) → OUTPUT NaN/Inf scrub (graph boundary)
+        → meter tap → publish EngineSnapshot
 
     COMMAND DRAIN (Phase-2 arrangement — TEMPORARY): the master is the SINGLE
     consumer of the shared `EngineCommandQueue`. It drains at the top of its block
@@ -29,9 +30,13 @@ namespace arpbox::engine
     head-of-engine drain migrates to the transport/arp head node in Phase 5; the
     master then owns only gain/limiter/metering.
 
-    NaN/Inf SCRUB: this node is THE scrub point for the whole graph boundary — a
+    NaN/Inf SCRUB (defense-in-depth, issue #3): TWO scrubs. The INPUT scrub (before
+    gain/limiter) protects `dsp::Limiter` — one non-finite input sample poisons its
+    ballistics and, with only a post-limiter scrub, would silence the master
+    permanently until the next prepareToPlay; scrubbing the input lets the limiter
+    recover on the next clean block. The OUTPUT scrub is THE graph-boundary guard — a
     non-finite sample reaching CoreAudio can wedge the driver, so every sample is
-    forced finite here, once, after gain+limiter and before metering/output.
+    forced finite once more after gain+limiter, before metering/output.
 
     All sample-rate-dependent DSP state (`dsp::Gain`, `dsp::Limiter`) is prepared
     ONLY in `prepareToPlay`; `processBlock` never allocates, locks, or re-prepares. */

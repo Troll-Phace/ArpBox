@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ISynthEngine.h"
+
 #include "hosting/InstantiationResult.h"
 #include "hosting/PluginInstantiator.h"
 
@@ -16,9 +18,6 @@ class HostedPluginNode;
 
 namespace arpbox::app
 {
-// Forward decl: the app audio backbone (reference member; included in the .cpp).
-class AudioEngine;
-
 /** Message-thread coordinator for the single instrument (synth) slot (ARCHITECTURE
     §6.2, §6.3; INSTRUCTIONS Phase 4.3).
 
@@ -48,10 +47,11 @@ class AudioEngine;
 class SynthSlot final
 {
 public:
-    /** Builds the coordinator. Borrows the engine (the graph it hands synths to)
-        and a format manager (to construct the internal `PluginInstantiator`); BOTH
-        must outlive this object. MESSAGE-THREAD ONLY. */
-    SynthSlot (AudioEngine& engineToUse, juce::AudioPluginFormatManager& formats);
+    /** Builds the coordinator. Borrows the engine (the graph it hands synths to,
+        via the GUI-free `ISynthEngine` seam) and a format manager (to construct the
+        internal `PluginInstantiator`); BOTH must outlive this object. MESSAGE-THREAD
+        ONLY. */
+    SynthSlot (ISynthEngine& engineToUse, juce::AudioPluginFormatManager& formats);
 
     /** Destroys the coordinator. Any pending async load is neutralised by the
         `WeakReference` guard, so a late instantiation callback becomes a no-op (it
@@ -136,7 +136,12 @@ private:
     // synth (no-op when none is loaded).
     void applyGainToCurrent ();
 
-    AudioEngine& engine; ///< Non-owning; the graph this coordinator hands synths to.
+    // MESSAGE-THREAD ONLY: enters the awaitingFadeOut state and (re)arms the bounded
+    // fade-out poll budget (issue #24). Call when the current synth starts fading out
+    // for a swap or a remove.
+    void beginFadeOutWait () noexcept;
+
+    ISynthEngine& engine; ///< Non-owning; the graph this coordinator hands synths to.
     hosting::PluginInstantiator instantiator; ///< Owns the async create+prepare path.
 
     // Non-owning: valid while the engine graph owns the node. Cleared on removal.
@@ -150,6 +155,17 @@ private:
     juce::String pendingName;
 
     State state = State::idle;
+
+    // Bounded fade-out wait (issue #24). The wrapper's `isFadeOutComplete()` flag
+    // only advances inside its audio-thread `processBlock`, so if the device is
+    // stopped/dead the fade never completes and `poll()` would wait — and
+    // `isPending()` stay true — forever. `poll()` counts this budget down while
+    // awaiting the handshake and forces the graph edit when it reaches zero, so a
+    // swap/remove requested while audio is stopped terminates. When audio IS running
+    // the ~10 ms fade completes within 1–2 frames, far inside the budget, so the
+    // click-free behaviour is untouched. Message-thread only; re-armed per wait.
+    static constexpr int kMaxFadeOutPolls = 30; ///< ~0.5 s at 60 fps.
+    int fadeOutPollsRemaining = 0;
 
     // In-flight invalidation (issue #16). Message-thread only — NOT atomic. Bumped by
     // load()/remove(); each instantiation callback captures the value at request time
