@@ -92,10 +92,10 @@ public:
         fifo.prepareToRead (ready, start1, size1, start2, size2);
 
         for (int i = 0; i < size1; ++i)
-            fn (std::as_const (storage[static_cast<std::size_t> (start1 + i)]));
+            fn (std::as_const (storage[static_cast<std::size_t> (start1) + static_cast<std::size_t> (i)]));
 
         for (int i = 0; i < size2; ++i)
-            fn (std::as_const (storage[static_cast<std::size_t> (start2 + i)]));
+            fn (std::as_const (storage[static_cast<std::size_t> (start2) + static_cast<std::size_t> (i)]));
 
         fifo.finishedRead (size1 + size2);
     }
