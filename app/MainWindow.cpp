@@ -1,16 +1,18 @@
 #include "MainWindow.h"
 
+#include "DebugPanel.h"
+
 namespace arpbox::app
 {
-MainWindow::MainWindow (const juce::String& name)
+MainWindow::MainWindow (const juce::String& name, AudioEngine& engine)
     : juce::DocumentWindow (name, juce::Colours::black, juce::DocumentWindow::allButtons)
 {
     setUsingNativeTitleBar (true);
 
-    // Empty placeholder content. Real UI (ARCHITECTURE §10) arrives in Phase 15+.
-    auto content = std::make_unique<juce::Component> ();
-    content->setSize (1280, 800); // §10.2 minimum window size.
-    setContentOwned (content.release (), true);
+    // Phase 2 temporary content: the debug panel. Real UI (ARCHITECTURE §10)
+    // replaces it in Phase 15+. The window owns the panel; the panel holds only a
+    // non-owning reference to the engine, which outlives this window.
+    setContentOwned (new DebugPanel (engine), true);
 
     setResizable (true, true);
     setResizeLimits (1280, 800, 10000, 10000);

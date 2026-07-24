@@ -31,16 +31,36 @@ list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
 
 # ── Test executable ──────────────────────────────────────────────────────────
-# One binary carrying all five suites. Catch2WithMain supplies main(); the engine
-# lib is linked so headless engine tests can construct real engine objects later.
+# One binary carrying all suites. Catch2WithMain supplies main(); the engine lib
+# is linked so headless engine tests construct real engine objects.
+#
+# Phase 2.4 infrastructure tests (ARCHITECTURE §3.4, §11): the SPSC FIFO / command
+# / event channels, the snapshot triple buffer + retirement queue, the concurrent
+# TSan stress, the headless EngineGraph render smoke, and the zero-allocation
+# steady-state guard. support/AllocationCounter.cpp REPLACES the global operator
+# new/delete for the allocation guard — it must live in THIS test binary only
+# (never in arpbox_engine / the app); see support/AllocationSentinel.h.
 add_executable(arpbox_tests
     smoke_unit.cpp
     smoke_determinism.cpp
     smoke_midi_conformance.cpp
     smoke_hosting_lab.cpp
-    smoke_perf_budget.cpp)
+    smoke_perf_budget.cpp
+    # Phase 2.4 infrastructure test suite.
+    infra_fifo.cpp
+    infra_snapshot.cpp
+    infra_tsan_stress.cpp
+    graph_smoke.cpp
+    infra_alloc_guard.cpp
+    support/AllocationCounter.cpp
+    support/AllocationSentinel.h)
 
 target_compile_features(arpbox_tests PRIVATE cxx_std_20)
+
+# tests/ as an include root so tests reach support/ headers as
+# "support/AllocationSentinel.h" (engine headers come via arpbox_engine's exported
+# "engine/..." include root).
+target_include_directories(arpbox_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(arpbox_tests
     PRIVATE

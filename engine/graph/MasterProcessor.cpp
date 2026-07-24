@@ -1,0 +1,190 @@
+#include "MasterProcessor.h"
+
+#include "EngineSnapshot.h"
+
+#include <cmath>
+
+namespace arpbox::engine
+{
+namespace
+{
+    // Safety-limiter defaults: a hair below 0 dBFS so the internal hard clip at
+    // 0 dB is a true last resort, with a musical release for resonant spikes.
+    constexpr float limiterThresholdDb = -1.0f;
+    constexpr float limiterReleaseMs = 100.0f;
+
+    // Gain smoothing time — click-free response to master-gain commands.
+    constexpr double gainSmoothingSeconds = 0.02;
+} // namespace
+
+MasterProcessor::MasterProcessor ()
+    : juce::AudioProcessor (
+          BusesProperties ()
+              .withInput ("Input", juce::AudioChannelSet::stereo (), true)
+              .withOutput ("Output", juce::AudioChannelSet::stereo (), true))
+{
+}
+
+// MESSAGE-THREAD ONLY:
+void MasterProcessor::setSharedState (EngineCommandQueue* commands,
+                                      EngineSnapshotBuffer* snapshots,
+                                      ToneControl* tone) noexcept
+{
+    commandQueue = commands;
+    snapshotBuffer = snapshots;
+    toneControl = tone;
+}
+
+// MESSAGE-THREAD ONLY:
+void MasterProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock)
+{
+    const auto sr = sampleRate > 0.0 ? sampleRate : 44100.0;
+    const auto blockSize =
+        static_cast<juce::uint32> (juce::jmax (1, maximumExpectedSamplesPerBlock));
+
+    const juce::dsp::ProcessSpec spec { sr, blockSize, 2 };
+
+    outputGain.prepare (spec);
+    outputGain.setRampDurationSeconds (gainSmoothingSeconds);
+    outputGain.setGainLinear (1.0f); // unity until a setMasterGainDb command arrives
+
+    limiter.prepare (spec);
+    limiter.setThreshold (limiterThresholdDb);
+    limiter.setRelease (limiterReleaseMs);
+    limiter.reset ();
+}
+
+// RT-SAFE:
+void MasterProcessor::applyCommand (const EngineCommand& command) noexcept
+{
+    switch (command.type)
+    {
+        case EngineCommandType::setMasterGainDb:
+            outputGain.setGainDecibels (command.value.f); // smoothed to target
+            break;
+
+        case EngineCommandType::setLimiterEnabled:
+            limiterEnabled = command.value.i != 0;
+            break;
+
+        case EngineCommandType::setTestToneEnabled:
+            if (toneControl != nullptr)
+                toneControl->enabled.store (command.value.i != 0, std::memory_order_relaxed);
+            break;
+
+        case EngineCommandType::setTestToneFrequency:
+            if (toneControl != nullptr)
+                toneControl->frequencyHz.store (command.value.f, std::memory_order_relaxed);
+            break;
+
+        case EngineCommandType::none:
+        default:
+            break; // unknown/sentinel — ignore
+    }
+}
+
+// RT-SAFE:
+void MasterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals noDenormals;
+
+    // 1. Drain UI→engine commands (Phase-2 head-of-engine location; see header).
+    if (commandQueue != nullptr)
+        commandQueue->drain ([this] (const EngineCommand& c) noexcept { applyCommand (c); });
+
+    const int numChannels = buffer.getNumChannels ();
+    const int numSamples = buffer.getNumSamples ();
+
+    // 2. Output gain + 3. safety limiter, in place over the whole block.
+    if (numChannels > 0 && numSamples > 0)
+    {
+        juce::dsp::AudioBlock<float> block (buffer);
+        juce::dsp::ProcessContextReplacing<float> context (block);
+
+        outputGain.process (context);
+
+        if (limiterEnabled)
+            limiter.process (context);
+    }
+
+    // 4. NaN/Inf scrub — THE graph-boundary scrub point. A non-finite sample
+    //    reaching CoreAudio can wedge the driver; force every sample finite once,
+    //    after gain+limiter, before metering and output. Branch-free select.
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        float* const data = buffer.getWritePointer (ch);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float v = data[i];
+            data[i] = std::isfinite (v) ? v : 0.0f;
+        }
+    }
+
+    // 5. Meter tap — POST-limiter/POST-scrub, per-block LINEAR peak + RMS. O(n),
+    //    no per-sample atomics, no growing window.
+    float peak[2] = { 0.0f, 0.0f };
+    float rms[2] = { 0.0f, 0.0f };
+
+    for (int ch = 0; ch < juce::jmin (numChannels, 2); ++ch)
+    {
+        const float* const data = buffer.getReadPointer (ch);
+        float chPeak = 0.0f;
+        double sumSquares = 0.0;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float v = data[i];
+            const float a = std::abs (v);
+            if (a > chPeak)
+                chPeak = a;
+            sumSquares += static_cast<double> (v) * static_cast<double> (v);
+        }
+
+        peak[ch] = chPeak;
+        rms[ch] = numSamples > 0
+                      ? static_cast<float> (std::sqrt (sumSquares / static_cast<double> (numSamples)))
+                      : 0.0f;
+    }
+
+    // Mono safety: mirror L→R so the UI shows matching meters if ever mono.
+    if (numChannels == 1)
+    {
+        peak[1] = peak[0];
+        rms[1] = rms[0];
+    }
+
+    // 6. Publish the snapshot. Build a fresh, fully-defined snapshot (transport /
+    //    generative fields stay zero until Phase 5) so no stale slot data leaks.
+    ++blockCounter;
+    if (snapshotBuffer != nullptr)
+    {
+        EngineSnapshot snap;
+        snap.peakL = peak[0];
+        snap.peakR = peak[1];
+        snap.rmsL = rms[0];
+        snap.rmsR = rms[1];
+        snap.deviceStatus = deviceStatus.load (std::memory_order_relaxed);
+        snap.blockCounter = blockCounter;
+
+        snapshotBuffer->beginWrite () = snap;
+        snapshotBuffer->commit ();
+    }
+}
+
+// RT-SAFE:
+void MasterProcessor::processBlock (juce::AudioBuffer<double>& buffer, juce::MidiBuffer&)
+{
+    // The root graph runs in single precision; this must never be invoked. Mirror
+    // TestToneProcessor's double path: assert for debug visibility, and clear the
+    // buffer so a stray double-precision host cannot leak unscrubbed/unmetered
+    // garbage through this node (the float path does the scrub + metering).
+    jassertfalse; // graph is single precision
+    buffer.clear ();
+}
+
+bool MasterProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+{
+    return layouts.getMainInputChannelSet () == juce::AudioChannelSet::stereo ()
+        && layouts.getMainOutputChannelSet () == juce::AudioChannelSet::stereo ();
+}
+} // namespace arpbox::engine

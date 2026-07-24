@@ -16,7 +16,11 @@ juce_add_gui_app(ARPBOX
 target_sources(ARPBOX PRIVATE
     Main.cpp
     MainWindow.cpp
-    MainWindow.h)
+    MainWindow.h
+    AudioEngine.cpp
+    AudioEngine.h
+    DebugPanel.cpp
+    DebugPanel.h)
 
 target_compile_features(ARPBOX PUBLIC cxx_std_20)
 
@@ -32,9 +36,16 @@ target_compile_definitions(ARPBOX
 
 # arpbox_engine first (brings the non-GUI JUCE modules), then the GUI modules
 # the app itself needs.
+#
+# juce_audio_utils supplies AudioProcessorPlayer (the device→graph host). It
+# depends on the FULL juce_audio_processors, which in turn depends on the same
+# juce_audio_processors_headless the engine links — JUCE builds each module once,
+# so this layers on top without duplicating the engine's headless symbols. This
+# module is GUI-side ONLY; it is NEVER added to the engine (which stays headless).
 target_link_libraries(ARPBOX
     PRIVATE
         arpbox_engine
+        juce::juce_audio_utils
         juce::juce_gui_basics
         juce::juce_gui_extra
     PUBLIC
