@@ -30,9 +30,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_subdirectory(JUCE)
 
 # ── ARPBOX targets ───────────────────────────────────────────────────────────
-# engine/ : RT engine static lib, ZERO UI deps (guarded — see engine/CMakeLists).
-# app/    : JUCE GUI application target.
+# engine/  : RT engine static lib, ZERO UI deps (guarded — see engine/CMakeLists).
+# hosting/ : plugin scan/instantiate/persist static lib (links FULL, GUI-bearing
+#            juce_audio_processors). MUST come before app/ (app links hosting) and
+#            must NOT depend on engine (see hosting/CMakeLists dependency rule).
+# app/     : JUCE GUI application target.
 add_subdirectory(engine)
+add_subdirectory(hosting)
 add_subdirectory(app)
 
 # ── Tests: Catch2 v3 via CTest — the four contract suites + unit (Phase 1.2) ──
@@ -47,6 +51,5 @@ if(BUILD_TESTING)
 endif()
 
 # ── Placeholders filled in by later phases (do NOT create these dirs yet) ─────
-# add_subdirectory(hosting)          # Phase 3+  — plugin scan/host/wrappers
 # add_subdirectory(scanner-helper)   # Phase 20  — out-of-process scanner binary
 # add_subdirectory(ui)               # Phase 15+ — component library, screens

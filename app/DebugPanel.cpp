@@ -1,6 +1,8 @@
 // TEMPORARY DEBUG UI — replaced by the real UI in Phase 15+.
 #include "DebugPanel.h"
 
+#include "hosting/PluginManager.h"
+
 namespace arpbox::app
 {
 using namespace juce;
@@ -27,8 +29,10 @@ String statusText (std::uint8_t status)
 } // namespace
 
 // MESSAGE-THREAD ONLY.
-DebugPanel::DebugPanel (AudioEngine& engine)
+DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bool& scanForceKilledSinkRef)
     : audioEngine (engine),
+      pluginManager (plugins),
+      scanForceKilledSink (scanForceKilledSinkRef),
       vblank (this, [this] { refreshFromEngine (); })
 {
     // ── Test tone toggle ─────────────────────────────────────────────────────
@@ -77,9 +81,34 @@ DebugPanel::DebugPanel (AudioEngine& engine)
     addAndMakeVisible (simulateLossButton);
     simulateLossButton.onClick = [this] { audioEngine.simulateDeviceLoss (); };
 
+    // ── Plugin scan trigger (DEV-ONLY; removed with this panel in Phase 15+) ──
+    // Runs scanAll() on a BACKGROUND thread (it BLOCKS — never on the message
+    // thread). Progress + completion travel back via the cross-thread atomics that
+    // refreshFromEngine() reads on the vblank. Real scan UI is Phase 15+/20.
+    addAndMakeVisible (scanButton);
+    scanButton.onClick = [this] { startPluginScan (); };
+
+    addAndMakeVisible (cancelScanButton);
+    cancelScanButton.setEnabled (false);
+    cancelScanButton.onClick = [this]
+    {
+        // Two cancel channels: the manager's own latch and the thread's exit flag
+        // (the scan's cancel predicate polls the latter). Either aborts the pass.
+        pluginManager.cancelScan ();
+        scanThread.signalThreadShouldExit ();
+    };
+
     // ── Readout labels ───────────────────────────────────────────────────────
-    for (auto* label : { &deviceLabel, &statusBanner, &meterLabel, &blockLabel, &eventLabel })
+    for (auto* label :
+         { &deviceLabel, &statusBanner, &meterLabel, &blockLabel, &eventLabel, &pluginCountLabel, &scanStatusLabel })
         addAndMakeVisible (*label);
+
+    // Initial known-plugin count reflects the list restored at launch (Main.cpp
+    // calls PluginManager::restore() before this panel exists), so a relaunch after
+    // a scan shows the persisted count immediately — no scan running here, safe read.
+    pluginCountLabel.setText ("known plugins: " + String (pluginManager.getKnownPluginList ().getNumTypes ()),
+                              dontSendNotification);
+    scanStatusLabel.setText ("scan idle", dontSendNotification);
 
     deviceLabel.setText (audioEngine.getCurrentDeviceDescription (), dontSendNotification);
     statusBanner.setText (statusText (engine::deviceStatusOk), dontSendNotification);
@@ -96,6 +125,81 @@ DebugPanel::DebugPanel (AudioEngine& engine)
     pushInt (engine::EngineCommandType::setTestToneEnabled, 0);
 
     setSize (1280, 800);
+}
+
+// MESSAGE-THREAD ONLY. Teardown order matters: stop + join the scan worker FIRST
+// so it can no longer touch this panel or the borrowed PluginManager, THEN let the
+// members (including the vblank) destruct. stopThread signals threadShouldExit
+// (the scan's cancel predicate) and waits for run() to return.
+DebugPanel::~DebugPanel ()
+{
+    // stopThread returns true if the worker exited cleanly within the timeout,
+    // false if it had to be FORCE-KILLED (hung >5s inside one plugin's in-process
+    // scan). A force-kill can terminate the worker mid-mutation of the
+    // KnownPluginList — while it holds the list's internal lock — leaving the list
+    // locked/inconsistent. Report that up to the app (issue #14): the shutdown
+    // save() must then NOT read the list (it would deadlock or serialize corruption).
+    // The on-completion save() for normal scans already persisted a clean list.
+    scanForceKilledSink = ! scanThread.stopThread (5000);
+}
+
+// ── Background plugin scan (DEV-ONLY) ─────────────────────────────────────────
+
+DebugPanel::ScanThread::ScanThread (DebugPanel& ownerPanel)
+    : juce::Thread ("arpbox-plugin-scan"), owner (ownerPanel)
+{
+}
+
+// WORKER THREAD.
+void DebugPanel::ScanThread::run ()
+{
+    owner.runPluginScan ();
+}
+
+// MESSAGE-THREAD ONLY.
+void DebugPanel::startPluginScan ()
+{
+    if (scanThread.isThreadRunning ())
+        return; // a scan is already in flight
+
+    scanRunning.store (true, std::memory_order_relaxed);
+    scanProgress.store (0.0f, std::memory_order_relaxed);
+    {
+        const ScopedLock sl (scanNameLock);
+        currentScanName.clear ();
+    }
+
+    scanButton.setEnabled (false);
+    cancelScanButton.setEnabled (true);
+    scanStatusLabel.setText ("scanning…", dontSendNotification);
+
+    scanThread.startThread ();
+}
+
+// WORKER THREAD. Never touches JUCE components — writes only the cross-thread
+// atomics / lock-guarded string that the vblank reads on the message thread.
+void DebugPanel::runPluginScan ()
+{
+    auto onProgress = [this] (const String& pluginBeingScanned, float progress)
+    {
+        scanProgress.store (progress, std::memory_order_relaxed);
+        const ScopedLock sl (scanNameLock);
+        currentScanName = pluginBeingScanned;
+    };
+
+    auto shouldCancel = [this] { return scanThread.threadShouldExit (); };
+
+    // BLOCKING full pass across every registered format (VST3 + AU). Incremental
+    // (rescanExisting = false) so a relaunch + rescan skips known files.
+    const auto result = pluginManager.scanAll (/*rescanExisting*/ false, onProgress, shouldCancel);
+
+    lastScannedTypeCount.store (result.numTypesInList, std::memory_order_relaxed);
+    lastScanFailedCount.store (result.failedFiles.size (), std::memory_order_relaxed);
+    scanRunning.store (false, std::memory_order_relaxed);
+
+    // Release-store: publishes the completed list to the message thread, which then
+    // persists it (save() is message-thread only) on the next vblank.
+    scanJustFinished.store (true, std::memory_order_release);
 }
 
 // MESSAGE-THREAD ONLY.
@@ -122,6 +226,8 @@ void DebugPanel::resized ()
     meterLabel.setBounds (row (24));
     blockLabel.setBounds (row (24));
     eventLabel.setBounds (row (24));
+    pluginCountLabel.setBounds (row (24));
+    scanStatusLabel.setBounds (row (24));
 
     area.removeFromTop (12);
 
@@ -141,6 +247,14 @@ void DebugPanel::resized ()
     limiterButton.setBounds (row (28));
     area.removeFromTop (12);
     simulateLossButton.setBounds (row (32).removeFromLeft (240));
+
+    area.removeFromTop (12);
+    {
+        auto r = row (32);
+        scanButton.setBounds (r.removeFromLeft (160));
+        r.removeFromLeft (8);
+        cancelScanButton.setBounds (r.removeFromLeft (160));
+    }
 }
 
 // MESSAGE-THREAD ONLY (vblank ~60 fps).
@@ -186,6 +300,43 @@ void DebugPanel::refreshFromEngine ()
                             + "  |  dropped cmds: "
                             + String (audioEngine.commands ().getDroppedCount ()),
                         dontSendNotification);
+
+    // ── Plugin scan (DEV-ONLY) ───────────────────────────────────────────────
+    // Persist on completion HERE, on the message thread: the acquire-load pairs
+    // with the worker's release-store, so the KnownPluginList is fully written and
+    // no longer being mutated. save() is message-thread only.
+    if (scanJustFinished.exchange (false, std::memory_order_acquire))
+    {
+        pluginManager.save ();
+        scanButton.setEnabled (true);
+        cancelScanButton.setEnabled (false);
+        scanStatusLabel.setText ("scan complete: " + String (lastScannedTypeCount.load (std::memory_order_relaxed))
+                                     + " types, " + String (lastScanFailedCount.load (std::memory_order_relaxed))
+                                     + " failed",
+                                 dontSendNotification);
+    }
+
+    if (scanRunning.load (std::memory_order_relaxed))
+    {
+        // While a scan is in flight, show progress + the current file. Do NOT read
+        // the KnownPluginList here — the worker is mutating it.
+        String name;
+        {
+            const ScopedLock sl (scanNameLock);
+            name = currentScanName;
+        }
+        scanStatusLabel.setText ("scanning "
+                                     + String (roundToInt (scanProgress.load (std::memory_order_relaxed) * 100.0f))
+                                     + "%   " + name,
+                                 dontSendNotification);
+    }
+    else
+    {
+        // No worker mutating the list => safe to read the live count (confirms a
+        // restore-across-launches without any scan).
+        pluginCountLabel.setText ("known plugins: " + String (pluginManager.getKnownPluginList ().getNumTypes ()),
+                                  dontSendNotification);
+    }
 }
 
 // MESSAGE-THREAD ONLY.

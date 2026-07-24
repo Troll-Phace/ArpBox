@@ -44,7 +44,6 @@ add_executable(arpbox_tests
     smoke_unit.cpp
     smoke_determinism.cpp
     smoke_midi_conformance.cpp
-    smoke_hosting_lab.cpp
     smoke_perf_budget.cpp
     # Phase 2.4 infrastructure test suite.
     infra_fifo.cpp
@@ -53,9 +52,28 @@ add_executable(arpbox_tests
     graph_smoke.cpp
     infra_alloc_guard.cpp
     support/AllocationCounter.cpp
-    support/AllocationSentinel.h)
+    support/AllocationSentinel.h
+    # Phase 3.3 hosting-lab: hostile fake-plugin corpus + scan/instantiate/fail-path.
+    # The [hosting-lab] smoke placeholder (smoke_hosting_lab.cpp) is REPLACED by the
+    # real lab below (its own header comment anticipated this).
+    fakes/FakePlugins.h
+    fakes/FakePlugins.cpp
+    fakes/FakePluginFormat.h
+    fakes/FakePluginFormat.cpp
+    fakes/HostingLabSupport.h
+    hosting_scan.cpp
+    hosting_instantiate.cpp)
 
 target_compile_features(arpbox_tests PRIVATE cxx_std_20)
+
+# Phase 3.3: the hosting-lab must pump the JUCE message loop to receive the async
+# instantiation callbacks (PluginInstantiator delivers via MessageManager::callAsync
+# and JUCE's async plugin creation). MessageManager::runDispatchLoopUntil is compiled
+# only under JUCE_MODAL_LOOPS_PERMITTED. JUCE modules are recompiled per-target, so
+# this enables the pump API in the TEST BINARY ONLY — engine/hosting/app are
+# untouched. The bounded pump (fakes/HostingLabSupport.h) uses a hard timeout, so no
+# wall-clock sleep acts as a synchronization primitive.
+target_compile_definitions(arpbox_tests PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)
 
 # tests/ as an include root so tests reach support/ headers as
 # "support/AllocationSentinel.h" (engine headers come via arpbox_engine's exported
@@ -65,7 +83,12 @@ target_include_directories(arpbox_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(arpbox_tests
     PRIVATE
         Catch2::Catch2WithMain
-        arpbox_engine)
+        arpbox_engine
+        # Phase 3.3: the hosting-lab exercises the real hosting/ code path. This
+        # pulls in the FULL juce_audio_processors (arpbox_hosting links it), which
+        # layers on the juce_audio_processors_headless that arpbox_engine already
+        # links — JUCE builds each module once, so no duplicate-symbol/ODR clash.
+        arpbox_hosting)
 
 # Register each Catch2 TEST_CASE with CTest and turn its [tags] into CTest labels
 # (ADD_TAGS_AS_LABELS). PRE_TEST discovery runs the binary at test time rather

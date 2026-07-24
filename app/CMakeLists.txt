@@ -45,6 +45,11 @@ target_compile_definitions(ARPBOX
 target_link_libraries(ARPBOX
     PRIVATE
         arpbox_engine
+        # Plugin hosting (§6): scan/instantiate/persist. Links the FULL, GUI-bearing
+        # juce_audio_processors and PUBLIC-exports the "hosting/..." include root, so
+        # app/ can #include "hosting/PluginManager.h". Consistent with the full
+        # juce_audio_processors the app already pulls via juce_audio_utils.
+        arpbox_hosting
         juce::juce_audio_utils
         juce::juce_gui_basics
         juce::juce_gui_extra
