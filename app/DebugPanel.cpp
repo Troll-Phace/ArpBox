@@ -46,6 +46,7 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     : audioEngine (engine),
       pluginManager (plugins),
       scanForceKilledSink (scanForceKilledSinkRef),
+      synthSlot (engine, plugins.getFormatManager ()),
       vblank (this, [this] { refreshFromEngine (); })
 {
     // ── Test tone toggle ─────────────────────────────────────────────────────
@@ -94,6 +95,12 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     addAndMakeVisible (simulateLossButton);
     simulateLossButton.onClick = [this] { audioEngine.simulateDeviceLoss (); };
 
+    // ── On-screen / QWERTY keyboard (note input → engine note FIFO) ──────────
+    // Clicks AND computer-keyboard keypresses fire the MidiKeyboardState listener
+    // callbacks below, which push NoteEvents onto the lock-free note queue.
+    addAndMakeVisible (keyboard);
+    keyboardState.addListener (this);
+
     // ── Plugin scan trigger (DEV-ONLY; removed with this panel in Phase 15+) ──
     // Runs scanAll() on a BACKGROUND thread (it BLOCKS — never on the message
     // thread). Progress + completion travel back via the cross-thread atomics that
@@ -111,9 +118,41 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
         scanThread.signalThreadShouldExit ();
     };
 
+    // ── Synth slot (DEV-ONLY; real Sound-column UI is Phase 17) ──────────────
+    // load/swap/remove a hosted instrument + gain trim, all through SynthSlot (the
+    // async, failure-isolated, click-free-swap coordinator).
+    addAndMakeVisible (synthList);
+    synthList.setTextWhenNoChoicesAvailable ("no instruments — scan first");
+    synthList.setTextWhenNothingSelected ("select an instrument");
+    refreshSynthList ();
+
+    addAndMakeVisible (loadSynthButton);
+    loadSynthButton.onClick = [this]
+    {
+        const int idx = synthList.getSelectedItemIndex ();
+        if (idx >= 0 && idx < instrumentDescriptions.size ())
+            synthSlot.load (instrumentDescriptions.getReference (idx));
+    };
+
+    addAndMakeVisible (removeSynthButton);
+    removeSynthButton.onClick = [this] { synthSlot.remove (); };
+
+    addAndMakeVisible (synthGainLabel);
+    addAndMakeVisible (synthGainSlider);
+    synthGainSlider.setRange (-60.0, 6.0, 0.1);
+    synthGainSlider.setValue (0.0, dontSendNotification);
+    synthGainSlider.setTextValueSuffix (" dB");
+    synthGainSlider.onValueChange = [this]
+    {
+        synthSlot.setGainDb (static_cast<float> (synthGainSlider.getValue ()));
+    };
+
+    addAndMakeVisible (synthStatusLabel);
+    synthStatusLabel.setText ("synth: none", dontSendNotification);
+
     // ── Readout labels ───────────────────────────────────────────────────────
     for (auto* label :
-         { &deviceLabel, &statusBanner, &meterLabel, &blockLabel, &eventLabel, &pluginCountLabel, &scanStatusLabel })
+         { &deviceLabel, &statusBanner, &meterLabel, &voiceLabel, &blockLabel, &eventLabel, &pluginCountLabel, &scanStatusLabel })
         addAndMakeVisible (*label);
 
     // Initial known-plugin count reflects the list restored at launch (Main.cpp
@@ -127,6 +166,7 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     statusBanner.setText (statusText (engine::deviceStatusOk), dontSendNotification);
     statusBanner.setColour (Label::backgroundColourId, Colours::darkgreen);
     meterLabel.setText ("peak L/R: - / -   rms L/R: - / -", dontSendNotification);
+    voiceLabel.setText ("voices: 0", dontSendNotification);
     blockLabel.setText ("block: 0", dontSendNotification);
     eventLabel.setText ("events: 0  |  dropped cmds: 0", dontSendNotification);
 
@@ -146,6 +186,10 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
 // (the scan's cancel predicate) and waits for run() to return.
 DebugPanel::~DebugPanel ()
 {
+    // Detach the keyboard listener first so no late callback pushes notes during
+    // teardown.
+    keyboardState.removeListener (this);
+
     // stopThread returns true if the worker exited cleanly within the timeout,
     // false if it had to be FORCE-KILLED (hung >5s inside one plugin's in-process
     // scan). A force-kill can terminate the worker mid-mutation of the
@@ -223,6 +267,62 @@ void DebugPanel::runPluginScan ()
     scanJustFinished.store (true, std::memory_order_release);
 }
 
+// ── Synth slot (DEV-ONLY) ─────────────────────────────────────────────────────
+
+// MESSAGE-THREAD ONLY. Repopulates the combo from the known-plugin list, keeping
+// only instruments (synths). `instrumentDescriptions[i]` maps 1:1 to combo item i.
+void DebugPanel::refreshSynthList ()
+{
+    // Remember the currently-selected description so the selection survives a
+    // refresh (e.g. after a scan adds more instruments).
+    const int prevIndex = synthList.getSelectedItemIndex ();
+    const bool hadSelection = prevIndex >= 0 && prevIndex < instrumentDescriptions.size ();
+    const String prevIdentifier = hadSelection
+                                      ? instrumentDescriptions.getReference (prevIndex).createIdentifierString ()
+                                      : String {};
+
+    instrumentDescriptions.clearQuick ();
+    synthList.clear (dontSendNotification);
+
+    int itemId = 1;
+    int restoreIndex = -1;
+    for (const auto& desc : pluginManager.getKnownPluginList ().getTypes ())
+    {
+        if (! desc.isInstrument)
+            continue;
+
+        if (hadSelection && desc.createIdentifierString () == prevIdentifier)
+            restoreIndex = instrumentDescriptions.size ();
+
+        instrumentDescriptions.add (desc);
+        synthList.addItem (desc.name, itemId++);
+    }
+
+    if (restoreIndex >= 0)
+        synthList.setSelectedItemIndex (restoreIndex, dontSendNotification);
+}
+
+// MESSAGE-THREAD ONLY. Reflects the SynthSlot's current name / latency / pending /
+// error state in the readout label.
+void DebugPanel::refreshSynthStatus ()
+{
+    String text;
+    if (synthSlot.isLoaded ())
+        text = "synth: " + synthSlot.getCurrentSynthName ()
+             + "  (latency " + String (synthSlot.getLatencySamples ()) + " smp)";
+    else
+        text = "synth: none";
+
+    if (synthSlot.isPending ())
+        text += "  [loading…]";
+
+    const auto err = synthSlot.getLastError ();
+    if (err.isNotEmpty ())
+        text += "  ERROR: " + err;
+
+    synthStatusLabel.setText (text, dontSendNotification);
+}
+
 // MESSAGE-THREAD ONLY.
 void DebugPanel::paint (Graphics& g)
 {
@@ -245,6 +345,7 @@ void DebugPanel::resized ()
     statusBanner.setBounds (row (32));
     deviceLabel.setBounds (row (24));
     meterLabel.setBounds (row (24));
+    voiceLabel.setBounds (row (24));
     blockLabel.setBounds (row (24));
     eventLabel.setBounds (row (24));
     pluginCountLabel.setBounds (row (24));
@@ -276,11 +377,37 @@ void DebugPanel::resized ()
         r.removeFromLeft (8);
         cancelScanButton.setBounds (r.removeFromLeft (160));
     }
+
+    // ── Synth slot (DEV-ONLY) ────────────────────────────────────────────────
+    area.removeFromTop (12);
+    synthList.setBounds (row (28));
+    {
+        auto r = row (28);
+        loadSynthButton.setBounds (r.removeFromLeft (160));
+        r.removeFromLeft (8);
+        removeSynthButton.setBounds (r.removeFromLeft (160));
+    }
+    {
+        auto r = row (28);
+        synthGainLabel.setBounds (r.removeFromLeft (90));
+        synthGainSlider.setBounds (r);
+    }
+    synthStatusLabel.setBounds (row (24));
+
+    // On-screen / QWERTY keyboard occupies the bottom strip.
+    area.removeFromTop (12);
+    keyboard.setBounds (area.removeFromBottom (96));
 }
 
 // MESSAGE-THREAD ONLY (vblank ~60 fps).
 void DebugPanel::refreshFromEngine ()
 {
+    // Advance the synth-slot swap/remove state machine on the UI tick (NOT a
+    // juce::Timer): this polls the outgoing node's isFadeOutComplete() handshake and
+    // performs the graph edit only once it is genuinely silent.
+    synthSlot.poll ();
+    refreshSynthStatus ();
+
     const auto& snapshot = audioEngine.snapshots ().read ();
 
     // ── Meters (convert LINEAR → dB for display only) ────────────────────────
@@ -289,6 +416,9 @@ void DebugPanel::refreshFromEngine ()
                             + "   rms L/R: " + linearToDbString (snapshot.rmsL)
                             + " / " + linearToDbString (snapshot.rmsR),
                         dontSendNotification);
+
+    // ── Live MIDI-in voice count (interim; sequencer owns it in Phase 8) ─────
+    voiceLabel.setText ("voices: " + String (snapshot.voiceCount), dontSendNotification);
 
     // ── Starvation: blockCounter must advance frame-over-frame ───────────────
     const bool advancing = snapshot.blockCounter != lastBlockCounter;
@@ -329,6 +459,7 @@ void DebugPanel::refreshFromEngine ()
     if (scanJustFinished.exchange (false, std::memory_order_acquire))
     {
         pluginManager.save ();
+        refreshSynthList (); // newly-scanned instruments can now be loaded.
         scanButton.setEnabled (true);
         cancelScanButton.setEnabled (false);
         scanStatusLabel.setText ("scan complete: " + String (lastScannedTypeCount.load (std::memory_order_relaxed))
@@ -400,6 +531,18 @@ void DebugPanel::refreshFromEngine ()
                                       + "   quarantined: " + String (list.getBlacklistedFiles ().size ()),
                                   dontSendNotification);
     }
+}
+
+// MESSAGE-THREAD ONLY. On-screen click or QWERTY keypress → engine note queue.
+void DebugPanel::handleNoteOn (juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float velocity)
+{
+    audioEngine.pushNoteOn (midiChannel, midiNoteNumber, jlimit (1, 127, roundToInt (velocity * 127.0f)));
+}
+
+// MESSAGE-THREAD ONLY.
+void DebugPanel::handleNoteOff (juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float)
+{
+    audioEngine.pushNoteOff (midiChannel, midiNoteNumber);
 }
 
 // MESSAGE-THREAD ONLY.

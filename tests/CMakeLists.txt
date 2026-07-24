@@ -63,6 +63,13 @@ add_executable(arpbox_tests
     fakes/HostingLabSupport.h
     hosting_scan.cpp
     hosting_instantiate.cpp
+    # Phase 4.4 synth-hosting integration + RT tests (HostedPluginNode wrapper, the
+    # MIDI-In node, and the fake-synth end-to-end / swap-under-playback graph paths).
+    fakes/HostedSynthGraphSupport.h
+    hosted_node_unit.cpp
+    midi_input_node.cpp
+    hosting_synth_e2e.cpp
+    hosting_swap_stress.cpp
     # Issue #19 in-process-scan crash-recovery stopgap: dead-man's-pedal blacklist,
     # blacklist persistence round-trip, and incremental-resume skip (headless).
     hosting_crash_recovery.cpp

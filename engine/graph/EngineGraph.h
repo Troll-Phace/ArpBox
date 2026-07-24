@@ -6,9 +6,16 @@
 #include "EngineEvent.h"
 #include "EngineSnapshotBuffer.h"
 #include "MasterProcessor.h"
+#include "MidiInputControl.h"
+#include "MidiInputProcessor.h"
+#include "NoteEvent.h"
 #include "ToneControl.h"
 
+#include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors_headless/juce_audio_processors_headless.h>
+
+#include <cstdint>
+#include <memory>
 
 namespace arpbox::engine
 {
@@ -24,10 +31,16 @@ namespace arpbox::engine
       MUST stop the `AudioProcessorPlayer` (detach this graph) before destroying
       the `EngineGraph`.
 
-    TOPOLOGY (built once, on the message thread, in the constructor — NEVER edited
-    from the audio thread): `TestTone → Master → audioOutput`, stereo pairs. An
-    `audioInput` and a `midiInput` IO node are added for topology completeness and
-    left unconnected until Phase 4 wires the synth/MIDI path.
+    TOPOLOGY (built once, on the message thread, in the constructor): the fixed
+    core is `MidiIn` and `TestTone → Master → audioOutput` (stereo pairs). The
+    `MidiIn` node (a `MidiInputProcessor`) merges QWERTY/pad events (the owned
+    `NoteEventQueue`) with hardware MIDI (the owned `MidiMessageCollector`) and is
+    left MIDI-unconnected until a synth is set. `setSynth()` inserts the synth on
+    the MESSAGE thread with `UpdateKind::async`, wiring `MidiIn → synth → Master`;
+    the debug `TestTone → Master` edge is kept (tone off by default) as a fallback
+    source. An `audioInput` and the graph's own `midiInput` IO node are added for
+    completeness and stay unconnected. Topology is NEVER edited from the audio
+    thread.
 
     HOSTING: `getProcessor()` returns the underlying `AudioProcessorGraph` for
     `AudioProcessorPlayer::setProcessor`. The player prepares/processes the graph;
@@ -67,6 +80,53 @@ public:
     /** Discrete engine→UI event queue (audio thread is the only producer). */
     EngineEventQueue& events () noexcept { return eventQueue; }
 
+    // MESSAGE-THREAD ONLY (producer side of the QWERTY/pad note channel, §3.3).
+    /** UI-writable note-event queue (on-screen keyboard / QWERTY / pads); drained
+        by the MIDI-In node on the audio thread. */
+    NoteEventQueue& notes () noexcept { return noteQueue; }
+
+    // MESSAGE-THREAD ONLY: the shared hardware-MIDI collector. The app's
+    // `MidiInputCallback` feeds it off the MIDI thread; the MIDI-In node drains it
+    // on the audio thread. Its sample rate is (re)configured by the MIDI-In node's
+    // prepareToPlay — callers must NOT reset it concurrently.
+    /** Shared `juce::MidiMessageCollector` for hardware MIDI input. */
+    juce::MidiMessageCollector& midiInputCollector () noexcept { return midiCollector; }
+
+    // ── Synth slot: type-agnostic graph topology API (§3.3, §6.3) ────────────
+
+    // MESSAGE-THREAD ONLY: inserts (or swaps in) the synth instance, wiring
+    // `MidiIn → synth → Master` with `UpdateKind::async`. The instance is the BASE
+    // `juce::AudioProcessor` type — the engine never names the hosting wrapper. The
+    // instance MUST already be prepared by the caller (the graph re-prepares it for
+    // its own SR/block during the async rebuild; do not double-prepare). If a synth
+    // is already present it is removed first (JUCE reclaims the retired node on the
+    // message thread). Passing `nullptr` is equivalent to `removeSynth()`.
+    /** Sets/swaps the hosted synth in the single instrument slot. */
+    void setSynth (std::unique_ptr<juce::AudioProcessor> synth);
+
+    // MESSAGE-THREAD ONLY: removes the current synth (async). Safe when none is set.
+    /** Removes the hosted synth from the instrument slot. */
+    void removeSynth ();
+
+    // MESSAGE-THREAD ONLY: requests a one-shot all-notes-off flush (CC123 on all
+    // channels) on the MIDI-In path and zeroes its voice count. A flush primitive
+    // for the plugin-slot coordinator around synth swaps/removals (§5.5).
+    /** Requests an all-notes-off flush on the MIDI-in path. */
+    void allNotesOff () noexcept;
+
+    // MESSAGE-THREAD ONLY: sets the MIDI-input channel filter (bit i ⇒ channel i+1
+    // passes). Default all-pass. Lock-free; the audio thread reads it next block.
+    /** Sets the 16-bit MIDI-input channel mask. */
+    void setMidiChannelMask (std::uint16_t mask) noexcept;
+
+    // MESSAGE-THREAD ONLY: the graph's current audio config, for preparing a synth
+    // instance to hand to `setSynth()`. Valid once the graph/player has been
+    // prepared (0 before then).
+    /** Current graph sample rate (Hz). */
+    double getSampleRate () const noexcept;
+    /** Current graph block size (samples). */
+    int getBlockSize () const noexcept;
+
     // MESSAGE-THREAD ONLY: headless prepare. The app path (AudioProcessorPlayer)
     // prepares the graph itself; call this only when driving the graph directly.
     /** Configures stereo I/O and prepares the graph and all nodes. */
@@ -92,12 +152,21 @@ private:
     EngineSnapshotBuffer snapshotBuffer;
     EngineEventQueue eventQueue;
     ToneControl toneControl;
+    NoteEventQueue noteQueue;             ///< QWERTY/pad channel; MIDI-In node consumes.
+    juce::MidiMessageCollector midiCollector; ///< Hardware MIDI; fed off the MIDI thread, drained by the MIDI-In node.
+    MidiInputControl midiControl;         ///< MIDI-In channel mask / voice count / flush.
 
     // The root graph owns the processor nodes.
     juce::AudioProcessorGraph graph;
 
     // Non-owning handle into a graph-owned node (for setDeviceStatus forwarding).
     MasterProcessor* masterProcessor = nullptr;
+    MidiInputProcessor* midiInputProcessor = nullptr; ///< Non-owning; graph-owned MIDI-In node.
+
+    // Message-thread-only node identities retained for topology edits.
+    juce::AudioProcessorGraph::NodeID midiInputNodeId; ///< MIDI-In node (source of synth MIDI).
+    juce::AudioProcessorGraph::NodeID masterNodeId;    ///< Master node (synth audio sink).
+    juce::AudioProcessorGraph::NodeID synthNodeId;     ///< Current synth (invalid uid 0 when none).
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EngineGraph)
 };

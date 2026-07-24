@@ -92,6 +92,24 @@ void MasterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     if (commandQueue != nullptr)
         commandQueue->drain ([this] (const EngineCommand& c) noexcept { applyCommand (c); });
 
+    // 1b. Graph-latency reporting. Poll the source (the root graph) and emit a
+    //     latencyChanged event ONLY on a change. The audio thread is the sole
+    //     producer of EngineEventQueue (EngineEvent.h), so this must happen here,
+    //     not on the message thread that edits topology. Reading getLatencySamples()
+    //     is a lock-free int read; a one-block-stale value is fine for a UI badge.
+    if (latencySource != nullptr && eventQueue != nullptr)
+    {
+        const std::int32_t latency = latencySource->getLatencySamples ();
+        if (latency != lastReportedLatency)
+        {
+            lastReportedLatency = latency;
+            EngineEvent ev;
+            ev.type = EngineEventType::latencyChanged;
+            ev.a = static_cast<std::uint32_t> (juce::jmax (0, latency));
+            eventQueue->push (ev);
+        }
+    }
+
     const int numChannels = buffer.getNumChannels ();
     const int numSamples = buffer.getNumSamples ();
 
@@ -164,6 +182,9 @@ void MasterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         snap.rmsL = rms[0];
         snap.rmsR = rms[1];
         snap.deviceStatus = deviceStatus.load (std::memory_order_relaxed);
+        snap.voiceCount = voiceCountSource != nullptr
+                              ? voiceCountSource->load (std::memory_order_relaxed)
+                              : static_cast<std::uint16_t> (0);
         snap.blockCounter = blockCounter;
 
         snapshotBuffer->beginWrite () = snap;

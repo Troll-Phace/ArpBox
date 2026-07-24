@@ -5,10 +5,13 @@
 #include "engine/graph/EngineEvent.h"
 #include "engine/graph/EngineGraph.h"
 #include "engine/graph/EngineSnapshotBuffer.h"
+#include "engine/graph/NoteEvent.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include <atomic>
+#include <cstdint>
+#include <memory>
 
 namespace arpbox::app
 {
@@ -35,10 +38,21 @@ namespace arpbox::app
     `EngineSnapshot.deviceStatus` (a level field the audio thread copies into every
     snapshot) — NOT pushed onto `events()`, whose sole producer is the audio thread.
 
+    HARDWARE MIDI INPUT (§9): all available MIDI input devices are enabled and this
+    class registers as a `juce::MidiInputCallback`. Each incoming message is
+    forwarded (off the MIDI thread) into the graph's shared `MidiMessageCollector`,
+    which the MIDI-In graph node drains on the audio thread. QWERTY/pad notes take a
+    separate lock-free path: `pushNoteOn`/`pushNoteOff` post PODs onto the graph's
+    `NoteEventQueue`, drained by the same MIDI-In node. The shared collector's
+    sample rate is configured by the MIDI-In node's `prepareToPlay` (driven by the
+    player when the device starts), so this class deliberately never calls
+    `collector.reset()` — that would race the audio-thread drain.
+
     MESSAGE-THREAD ONLY unless a method is explicitly marked otherwise. */
 class AudioEngine final : private juce::AudioIODeviceCallback,
                           private juce::AsyncUpdater,
-                          private juce::ChangeListener
+                          private juce::ChangeListener,
+                          private juce::MidiInputCallback
 {
 public:
     // MESSAGE-THREAD ONLY: constructs the graph, loads persisted device settings,
@@ -67,6 +81,59 @@ public:
     // MESSAGE-THREAD ONLY (consumer side of the engine→UI event channel).
     /** Discrete engine→UI event queue (audio thread is the only producer). */
     engine::EngineEventQueue& events () noexcept { return graph.events (); }
+
+    // ── QWERTY/pad note input (message thread → note FIFO → MIDI-In node) ─────
+
+    // MESSAGE-THREAD ONLY (producer side of the note channel §3.3). Pushes a POD
+    // NoteEvent; fully lock-free. Values are clamped to valid MIDI ranges.
+    /** Queues a note-on (channel 1..16, note 0..127, velocity 1..127). */
+    void pushNoteOn (int channel, int note, int velocity)
+    {
+        engine::NoteEvent e;
+        e.kind = engine::NoteEventKind::noteOn;
+        e.channel = static_cast<std::uint8_t> (juce::jlimit (1, 16, channel));
+        e.note = static_cast<std::uint8_t> (juce::jlimit (0, 127, note));
+        e.velocity = static_cast<std::uint8_t> (juce::jlimit (1, 127, velocity));
+        graph.notes ().push (e);
+    }
+
+    // MESSAGE-THREAD ONLY (producer side of the note channel §3.3).
+    /** Queues a note-off (channel 1..16, note 0..127). */
+    void pushNoteOff (int channel, int note)
+    {
+        engine::NoteEvent e;
+        e.kind = engine::NoteEventKind::noteOff;
+        e.channel = static_cast<std::uint8_t> (juce::jlimit (1, 16, channel));
+        e.note = static_cast<std::uint8_t> (juce::jlimit (0, 127, note));
+        e.velocity = 0;
+        graph.notes ().push (e);
+    }
+
+    // MESSAGE-THREAD ONLY: request an all-notes-off flush on the MIDI-in path.
+    /** Flushes held MIDI-in notes (CC123 on all channels); a swap/removal primitive. */
+    void allNotesOff () { graph.allNotesOff (); }
+
+    // MESSAGE-THREAD ONLY: set the MIDI-input channel filter (bit i ⇒ channel i+1).
+    /** Sets the 16-bit MIDI-input channel mask (default all-pass). */
+    void setMidiChannelMask (std::uint16_t mask) { graph.setMidiChannelMask (mask); }
+
+    // ── Synth slot (seam for the plugin-slot coordinator, Delegation C) ───────
+
+    // MESSAGE-THREAD ONLY: hand a PREPARED synth instance to the engine's single
+    // instrument slot (wired MIDI-In → synth → Master). The engine takes ownership;
+    // prepare the instance at getCurrentSampleRate()/getCurrentBlockSize() first.
+    /** Sets/swaps the hosted synth (base `juce::AudioProcessor`). */
+    void setSynth (std::unique_ptr<juce::AudioProcessor> synth) { graph.setSynth (std::move (synth)); }
+
+    // MESSAGE-THREAD ONLY: removes the current synth.
+    /** Removes the hosted synth from the instrument slot. */
+    void removeSynth () { graph.removeSynth (); }
+
+    // MESSAGE-THREAD ONLY: current graph audio config for preparing a synth instance.
+    /** Current graph sample rate (Hz); 0 before the device is open. */
+    double getCurrentSampleRate () const noexcept { return graph.getSampleRate (); }
+    /** Current graph block size (samples); 0 before the device is open. */
+    int getCurrentBlockSize () const noexcept { return graph.getBlockSize (); }
 
     // MESSAGE-THREAD ONLY: exposes the device manager for a settings UI (later
     // phases) and tests.
@@ -115,6 +182,15 @@ private:
     // MESSAGE-THREAD ONLY: the device setup changed (user pick / auto-restart) —
     // re-persist and refresh the cached description.
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
+
+    // ── MidiInputCallback (MIDI-input thread) ────────────────────────────────
+
+    // MIDI-INPUT THREAD (a per-device high-priority thread, NOT the audio or
+    // message thread): forwards each hardware MIDI message into the graph's shared
+    // collector (internally synchronized), which the MIDI-In node drains on the
+    // audio thread. Does the minimum — no allocation beyond the collector's own.
+    void handleIncomingMidiMessage (juce::MidiInput* source,
+                                    const juce::MidiMessage& message) override;
 
     // ── Internal helpers (message thread) ────────────────────────────────────
 

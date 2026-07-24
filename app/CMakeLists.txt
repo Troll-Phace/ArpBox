@@ -19,6 +19,8 @@ target_sources(ARPBOX PRIVATE
     MainWindow.h
     AudioEngine.cpp
     AudioEngine.h
+    SynthSlot.cpp
+    SynthSlot.h
     DebugPanel.cpp
     DebugPanel.h)
 

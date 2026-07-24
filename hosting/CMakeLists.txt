@@ -20,7 +20,9 @@ add_library(arpbox_hosting STATIC
     PluginManager.h
     PluginManager.cpp
     PluginInstantiator.h
-    PluginInstantiator.cpp)
+    PluginInstantiator.cpp
+    HostedPluginNode.h
+    HostedPluginNode.cpp)
 
 target_compile_features(arpbox_hosting PUBLIC cxx_std_20)
 

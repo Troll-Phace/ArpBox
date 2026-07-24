@@ -39,6 +39,16 @@ AudioEngine::AudioEngine ()
     deviceManager.addAudioCallback (this);
     deviceManager.addChangeListener (this);
 
+    // 3b. Hardware MIDI input (§9). Enable every available input device and
+    //     register a global callback (empty identifier = all enabled inputs). Each
+    //     message is forwarded into the graph's shared collector on the MIDI thread;
+    //     the MIDI-In node drains it on the audio thread. Its sample rate is set by
+    //     the node's prepareToPlay (driven above by addAudioCallback(&player) →
+    //     audioDeviceAboutToStart), so we do NOT reset the collector here.
+    for (const auto& input : MidiInput::getAvailableDevices ())
+        deviceManager.setMidiInputDeviceEnabled (input.identifier, true);
+    deviceManager.addMidiInputDeviceCallback ({}, this);
+
     // 4. Reflect the opened device into the snapshot + cached readout.
     refreshDeviceDescription ();
     graph.setDeviceStatus (deviceManager.getCurrentAudioDevice () != nullptr
@@ -60,8 +70,10 @@ AudioEngine::~AudioEngine ()
     // Persist the current selection while the device is still open.
     saveDeviceState ();
 
-    // (b) Detach observers/callbacks. Remove the monitor and the player so no
-    //     device thread can touch either after this point.
+    // (b) Detach observers/callbacks. Remove the MIDI callback first so no MIDI
+    //     thread can push into the graph's collector after this; then the monitor
+    //     and the player so no device thread can touch either after this point.
+    deviceManager.removeMidiInputDeviceCallback ({}, this);
     deviceManager.removeChangeListener (this);
     deviceManager.removeAudioCallback (this);
     deviceManager.removeAudioCallback (&player);
@@ -276,5 +288,13 @@ void AudioEngine::changeListenerCallback (juce::ChangeBroadcaster*)
 {
     refreshDeviceDescription ();
     saveDeviceState ();
+}
+
+// MIDI-INPUT THREAD. Forward the message to the graph's shared collector; the
+// MIDI-In node drains it on the audio thread. addMessageToQueue is internally
+// synchronized (the collector's own lock), so this cross-thread hand-off is safe.
+void AudioEngine::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& message)
+{
+    graph.midiInputCollector ().addMessageToQueue (message);
 }
 } // namespace arpbox::app
