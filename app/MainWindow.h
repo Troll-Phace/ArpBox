@@ -4,18 +4,26 @@
 
 namespace arpbox::app
 {
+class AudioEngine;
+
 /** The application's single top-level window.
 
-    Phase 1 scaffold: an empty, resizable, native-titlebar DocumentWindow titled
-    "ARPBOX". The three-column layout (ARCHITECTURE §10.2) is built out in the UI
-    phases (15+). Closing the window quits the app cleanly.
+    Phase 2: hosts the temporary `DebugPanel` (test tone, meters, device-status
+    banner) as its content component. The three-column layout (ARCHITECTURE §10.2)
+    replaces the debug panel in the UI phases (15+). Closing the window quits the
+    app cleanly.
+
+    Holds a non-owning reference to the `AudioEngine` (owned by the application,
+    constructed before and destroyed after this window).
 
     MESSAGE-THREAD ONLY. */
 class MainWindow final : public juce::DocumentWindow
 {
 public:
-    /** Creates the main window. @param name the window title. */
-    explicit MainWindow (const juce::String& name);
+    /** Creates the main window with the debug panel content.
+        @param name   the window title.
+        @param engine the app audio backbone (non-owning; must outlive this). */
+    MainWindow (const juce::String& name, AudioEngine& engine);
 
     /** Requests app shutdown when the user closes the window. */
     void closeButtonPressed () override;

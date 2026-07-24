@@ -19,7 +19,7 @@
     {
       "name": "asan",
       "displayName": "AddressSanitizer",
-      "description": "RelWithDebInfo + AddressSanitizer. Single-arch (arm64): sanitizer runtimes are per-arch and do not link into a universal binary, so ASan/TSan builds pin CMAKE_OSX_ARCHITECTURES to the host arch. Used by the CI ASan job (task 1.3) and RT-safety phases.",
+      "description": "RelWithDebInfo + AddressSanitizer. Single-arch (arm64): sanitizer runtimes are per-arch and do not link into a universal binary, so ASan/TSan builds pin CMAKE_OSX_ARCHITECTURES to the host arch. Used by the CI ASan job (task 1.3) and RT-safety phases. OBJC/OBJCXX flags mirror C/CXX so JUCE's Objective-C++ .mm unity TUs are instrumented too (see the tsan preset note).",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-asan",
       "cacheVariables": {
@@ -27,6 +27,8 @@
         "CMAKE_OSX_ARCHITECTURES": "arm64",
         "CMAKE_C_FLAGS": "-fsanitize=address -fno-omit-frame-pointer",
         "CMAKE_CXX_FLAGS": "-fsanitize=address -fno-omit-frame-pointer",
+        "CMAKE_OBJC_FLAGS": "-fsanitize=address -fno-omit-frame-pointer",
+        "CMAKE_OBJCXX_FLAGS": "-fsanitize=address -fno-omit-frame-pointer",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address",
         "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address"
       }
@@ -34,7 +36,7 @@
     {
       "name": "tsan",
       "displayName": "ThreadSanitizer",
-      "description": "RelWithDebInfo + ThreadSanitizer. Single-arch (arm64) for the same reason as ASan. Used by the CI TSan job (task 1.3) and to audit the FIFO/snapshot cross-thread machinery.",
+      "description": "RelWithDebInfo + ThreadSanitizer. Single-arch (arm64) for the same reason as ASan. Used by the CI TSan job (task 1.3) and to audit the FIFO/snapshot cross-thread machinery. OBJC/OBJCXX flags MUST mirror C/CXX: on macOS JUCE modules (juce_core, which owns juce::AbstractFifo, and the audio modules) compile as Objective-C++ .mm unity TUs, so without CMAKE_OBJCXX_FLAGS those TUs build UNINSTRUMENTED and TSan goes blind to the atomics inside them — producing false-positive payload races on every AbstractFifo-backed channel (SpscFifo/command/event/retirement).",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-tsan",
       "cacheVariables": {
@@ -42,6 +44,8 @@
         "CMAKE_OSX_ARCHITECTURES": "arm64",
         "CMAKE_C_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_OBJC_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_OBJCXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
         "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread"
       }

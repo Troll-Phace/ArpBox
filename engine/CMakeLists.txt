@@ -16,16 +16,54 @@
 add_library(arpbox_engine STATIC
     graph/EnginePlaceholder.cpp
     graph/EnginePlaceholder.h
+    # Phase 2.3 cross-thread infrastructure (ARCHITECTURE §3.4) — the ONLY
+    # cross-thread channels for the whole project. Header-only; listed here so
+    # they surface in IDEs and travel with the target. EnginePlaceholder.cpp
+    # remains the library's real translation unit.
+    graph/SpscFifo.h
+    graph/EngineCommand.h
+    graph/EngineSnapshot.h
+    graph/EngineSnapshotBuffer.h
+    graph/EngineEvent.h
+    graph/RetirementQueue.h
+    # Phase 2.2 master section, test-tone source, and root graph assembly
+    # (ARCHITECTURE §3.3, §7). No GUI deps — juce_dsp + headless audio_processors.
+    graph/DeviceStatus.h
+    graph/ToneControl.h
+    graph/TestToneProcessor.h
+    graph/TestToneProcessor.cpp
+    graph/MasterProcessor.h
+    graph/MasterProcessor.cpp
+    graph/EngineGraph.h
+    graph/EngineGraph.cpp
     EngineGuiGuard.h)
 
 target_compile_features(arpbox_engine PUBLIC cxx_std_20)
 
-# Engine headers use include paths rooted at the repo's engine/ parent, e.g.
-# #include "engine/graph/Foo.h" from outside, or relative from within engine/.
+# ── Public include scoping (issue #1) ────────────────────────────────────────
+# Consumers include engine headers as  #include "engine/graph/Foo.h"  (see
+# app/Main.cpp, tests/smoke_unit.cpp). That prefix needs a root directory that
+# has `engine/` as a child. Exporting the REPO ROOT (../) for that purpose leaks
+# EVERY sibling module (hosting/, ui/, packaging/, docs/, …) onto every
+# consumer's header search path — the defect tracked in issue #1.
+#
+# Fix: synthesize a private, single-entry include root in the build tree that
+# contains ONLY `engine` -> this source dir (a symlink), and export THAT. The
+# `engine/...` include convention keeps working, but nothing outside engine/ is
+# reachable through this target. Internal engine TUs use relative includes
+# (e.g. "../EngineGuiGuard.h"), so no in-tree bare-prefix export is needed.
+set(_engine_include_root "${CMAKE_CURRENT_BINARY_DIR}/include")
+file(MAKE_DIRECTORY "${_engine_include_root}")
+if(NOT EXISTS "${_engine_include_root}/engine")
+    file(CREATE_LINK
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${_engine_include_root}/engine"
+        SYMBOLIC)
+endif()
+
 target_include_directories(arpbox_engine
     PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/..)
+        ${_engine_include_root})
 
 # Semantic version string surfaced by EnginePlaceholder::getEngineVersion().
 target_compile_definitions(arpbox_engine

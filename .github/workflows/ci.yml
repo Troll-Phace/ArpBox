@@ -47,8 +47,13 @@ jobs:
         # Belt-and-suspenders gate: engine/ must compile with zero UI deps
         # (ARCHITECTURE §1.3). A CTest equivalent also runs; this dedicated
         # blocking step gives a clearer, order-independent failure signal.
+        # The regex MIRRORS tests/CheckEngineGuiFree.cmake's `forbidden_regex`
+        # EXACTLY — anchored to line start (^ + optional whitespace before a real
+        # `#include`) so a commented mention like `//   #include <juce_gui_basics/...>`
+        # in engine/EngineGuiGuard.h's docs is correctly ignored while every real
+        # violation is caught. Keep the two in sync if either changes.
         run: |
-          if grep -rEn '#include[ \t]*[<"]juce_(gui_basics|gui_extra|graphics)' engine/; then
+          if grep -rEn '^[ \t]*#[ \t]*include[ \t]*[<"]juce_(gui_basics|gui_extra|graphics)' engine/; then
             echo "::error::engine/ must not depend on JUCE GUI modules"; exit 1
           fi
 

@@ -28,12 +28,8 @@ xcuserdata/
 DerivedData/
 
 # --- IDE / editor user-specific state ---
-# Track shared .vscode config intentionally if added; ignore user-local files.
-.vscode/*
-!.vscode/settings.json
-!.vscode/extensions.json
-!.vscode/launch.json
-!.vscode/tasks.json
+# Ignore the entire .vscode/ folder — IDE config stays local, not tracked.
+.vscode/
 .idea/
 *.swp
 *.swo
