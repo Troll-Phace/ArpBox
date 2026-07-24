@@ -12,7 +12,7 @@ namespace arpbox::engine
     event half). Where `EngineSnapshot` carries continuous per-block STATE, these
     are one-shot NOTIFICATIONS the UI reacts to once (fire an animation, show a
     banner, recompute a latency badge). */
-enum class EngineEventType : std::uint16_t
+enum class EngineEventType : std::uint8_t
 {
     deviceChanged = 0,       ///< Active audio device changed (a = new SR, b = block size).
     deviceDied,              ///< Current device dropped out (unplugged / lost).

@@ -10,7 +10,7 @@ namespace arpbox::engine
 {
 /** Discriminator for a UI→engine command (ARCHITECTURE §3.4, channel 1).
 
-    Kept as a small `uint16_t` enum so `EngineCommand` stays a compact POD that
+    Kept as a small `uint8_t` enum so `EngineCommand` stays a compact POD that
     copies cheaply through the lock-free FIFO. One value per distinct action the
     message thread can ask the audio engine to perform.
 
@@ -18,7 +18,7 @@ namespace arpbox::engine
     (play/stop/locate, set-tempo), pattern-switch queueing, seed re-roll, commit,
     etc. are ADDED HERE in Phase 5+ as new enumerators — never as a second queue
     type. Extend this enum; do not fork the channel. */
-enum class EngineCommandType : std::uint16_t
+enum class EngineCommandType : std::uint8_t
 {
     none = 0,             ///< No-op / default-initialised sentinel.
     setMasterGainDb,      ///< value.f = target master gain in decibels.
