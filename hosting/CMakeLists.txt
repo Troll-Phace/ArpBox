@@ -71,3 +71,18 @@ target_compile_definitions(arpbox_hosting
     PUBLIC
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0)
+
+# ── AU editor view framework (CoreAudioKit) ──────────────────────────────────
+# With JUCE_PLUGINHOST_AU=1 (root CMakeLists), the FULL juce_audio_processors
+# module this target links references AUGenericView — the AudioUnit generic
+# editor view — which lives in CoreAudioKit.framework. JUCE only declares that
+# framework on juce_audio_utils (a module hosting does NOT link), so an executable
+# that links hosting WITHOUT audio_utils (e.g. arpbox_tests) fails to resolve
+# _OBJC_CLASS_$_AUGenericView. Declare the dependency where it actually
+# originates: hosting owns AU editor windows (ARCHITECTURE §6.4) via the full
+# module, so CoreAudioKit is genuinely hosting's. PUBLIC ⇒ consumers inherit it;
+# the app already pulls it transitively via juce_audio_utils (frameworks dedupe).
+# The engine stays clear of this — its HEADLESS module has no editor views.
+if(APPLE)
+    target_link_libraries(arpbox_hosting PUBLIC "-framework CoreAudioKit")
+endif()

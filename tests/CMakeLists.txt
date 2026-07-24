@@ -62,7 +62,10 @@ add_executable(arpbox_tests
     fakes/FakePluginFormat.cpp
     fakes/HostingLabSupport.h
     hosting_scan.cpp
-    hosting_instantiate.cpp)
+    hosting_instantiate.cpp
+    # Regression guard: the REAL production format registration helper actually
+    # registers VST3 + AudioUnit (guards the Phase 3 "0 formats" host-flag bug).
+    hosting_formats.cpp)
 
 target_compile_features(arpbox_tests PRIVATE cxx_std_20)
 
