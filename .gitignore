@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ARPBOX — .gitignore
+# Keep tracked: all project sources, the JUCE/ submodule (via .gitmodules),
+# tests/, .github/, CMakePresets.json, ArpBox.entitlements, design/.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# --- CMake build trees ---
+# build*/ also covers the sanitizer trees build-asan/ and build-tsan/ used by the
+# ASan/TSan CMakePresets (binaryDir build-asan / build-tsan). No tracked source
+# directory begins with "build", so the wildcard is safe.
+build*/
+cmake-build-*/
+
+# --- Claude Code local state (not tracked per Phase 1 spec) ---
+.claude/settings.local.json
+.claude/state/
+
+# --- macOS cruft ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# --- Xcode / generated project files ---
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# --- IDE / editor user-specific state ---
+# Track shared .vscode config intentionally if added; ignore user-local files.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+.idea/
+*.swp
+*.swo
+*~

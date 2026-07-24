@@ -1,0 +1,21 @@
+# ARPBOX — clang-tidy configuration (code-style.md "C++20 / JUCE Standards").
+#
+# The bugprone / performance / concurrency groups matter for the RT audio engine
+# (engine/, hosting/ processBlock call trees). A handful of checks are disabled
+# where they fight JUCE idioms or add no value at this stage; each is annotated.
+#
+# HeaderFilterRegex restricts diagnostics to OUR headers (app/ engine/ hosting/
+# scanner-helper/ ui/) — JUCE's own module headers are not linted.
+Checks: >
+    -*,
+    bugprone-*,
+    performance-*,
+    concurrency-*,
+    -bugprone-easily-swappable-parameters,
+    -bugprone-exception-escape
+
+WarningsAsErrors: '*'
+
+HeaderFilterRegex: '.*/(app|engine|hosting|scanner-helper|ui)/.*'
+
+FormatStyle: file

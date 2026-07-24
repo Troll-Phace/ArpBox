@@ -1,0 +1,63 @@
+# ARPBOX — JUCE-derived C++ style (code-style.md "Naming"/"C++20 / JUCE Standards")
+# 4-space indent, Allman braces, space before parens, left pointer alignment.
+---
+Language:        Cpp
+Standard:        c++20
+BasedOnStyle:    LLVM
+
+ColumnLimit:     120
+IndentWidth:     4
+TabWidth:        4
+UseTab:          Never
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+
+# Allman braces everywhere (JUCE house style).
+BreakBeforeBraces: Allman
+
+# JUCE keeps trivial inline accessors on a single line; everything else breaks.
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+AllowShortLambdasOnASingleLine: All
+
+# Signature spacing.
+PointerAlignment: Left
+ReferenceAlignment: Left
+SpaceBeforeParens: Always
+SpaceAfterCStyleCast: false
+SpacesInParens: Never
+SpaceBeforeAssignmentOperators: true
+SpacesBeforeTrailingComments: 1
+
+# Namespaces / templates.
+NamespaceIndentation: None
+FixNamespaceComments: true
+CompactNamespaces: false
+AlwaysBreakTemplateDeclarations: Yes
+
+# Switch / case.
+IndentCaseLabels: false
+
+# Constructor initialiser lists: one per line, comma-leading (JUCE convention).
+BreakConstructorInitializers: BeforeComma
+ConstructorInitializerIndentWidth: 4
+PackConstructorInitializers: Never
+
+# Includes: grouping/order is maintained by hand per code-style.md, so do not
+# let clang-format re-sort across our category boundaries.
+SortIncludes: false
+
+# Misc.
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+BinPackArguments: true
+BinPackParameters: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+Cpp11BracedListStyle: false
+SpaceBeforeCpp11BracedList: true
+EmptyLineBeforeAccessModifier: LogicalBlock
+IndentPPDirectives: AfterHash

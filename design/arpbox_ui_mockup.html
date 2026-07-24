@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARPBOX — UI Mockup v0.4 (piano roll)</title>
+<style>
+  :root{
+    --chassis:#232326; --panel:#2b2b2f; --panel2:#26262a;
+    --surface:#1b1b1f; --surface2:#17171a;
+    --silk:#b8b4aa; --silk-dim:#7a776f;
+    --line:#3a3a40; --line2:#46464e;
+    --red:#e0453a; --red-glow:rgba(224,69,58,.5);
+    --note:#ff6d5a; --note-edge:#c74537;
+    --ghost:#8f7ae8;
+    --amber:#ffb02e; --amber-glow:rgba(255,176,46,.4);
+    --accent:#e8e5de;
+    --rowlight:#232329; --rowdark:#1d1d22; --rowscale:#26262e;
+    --beatline:#3c3c46; --gridline:#28282e;
+  }
+  *{box-sizing:border-box; margin:0; padding:0; user-select:none;}
+  body{
+    background:#141416; color:var(--silk);
+    font-family:"Helvetica Neue", Inter, Arial, sans-serif;
+    display:flex; justify-content:center; padding:24px 8px;
+  }
+  .chassis{
+    width:1280px; background:var(--chassis); border-radius:14px;
+    box-shadow:0 30px 80px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.06);
+    padding:14px 18px 20px; position:relative; overflow:hidden;
+  }
+  .chassis::after{
+    content:""; position:absolute; inset:0; pointer-events:none; opacity:.04;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='120' height='120' filter='url(%23n)' opacity='0.6'/></svg>");
+  }
+  .silk{font-size:9px; letter-spacing:.22em; color:var(--silk-dim); text-transform:uppercase; font-weight:600;}
+  .section{border:1px solid var(--line); border-radius:6px; padding:10px; background:var(--panel2); position:relative;}
+  .section>.silk.title{position:absolute; top:-7px; left:10px; background:var(--chassis); padding:0 6px; color:var(--silk);}
+
+  /* ---------- header ---------- */
+  header{
+    display:flex; align-items:center; gap:16px; padding:6px 4px 12px;
+    border-bottom:2px solid var(--red); margin-bottom:14px; position:relative; z-index:1;
+  }
+  .logo{font-weight:800; font-size:20px; letter-spacing:.28em; color:#e8e5de;}
+  .logo em{color:var(--red); font-style:normal;}
+  .logo-sub{font-size:8px; letter-spacing:.3em; color:var(--silk-dim); margin-top:2px;}
+  .tbtn{
+    width:44px; height:30px; background:linear-gradient(#3a3a41,#2c2c31);
+    border:1px solid var(--line2); border-radius:4px; color:var(--silk);
+    display:flex; align-items:center; justify-content:center; font-size:13px; cursor:pointer;
+    box-shadow:0 2px 0 rgba(0,0,0,.5);
+  }
+  .tbtn:active{transform:translateY(1px); box-shadow:0 1px 0 rgba(0,0,0,.5);}
+  .tbtn.play.on{color:#7dffa0; text-shadow:0 0 8px rgba(125,255,160,.4);}
+  .tbtn.rec{color:#c66;}
+  .seg{
+    font-family:"SF Mono", Menlo, monospace; background:#160f04; border:1px solid #000;
+    border-radius:4px; color:var(--amber); font-size:24px; padding:2px 10px; letter-spacing:2px;
+    text-shadow:0 0 10px var(--amber-glow); min-width:110px; text-align:right;
+    box-shadow:inset 0 2px 8px rgba(0,0,0,.9);
+  }
+  .hgroup{display:flex; flex-direction:column; gap:3px; align-items:center;}
+  .hval{font-family:Menlo, monospace; font-size:11px; color:#d8d5cc;}
+  .cpu{width:60px; height:8px; background:#111; border:1px solid var(--line); border-radius:2px; overflow:hidden;}
+  .cpu i{display:block; height:100%; width:22%; background:linear-gradient(90deg,#3fae5a,#b7d34a);}
+  .spacer{flex:1;}
+  .proj{font-family:Menlo,monospace; font-size:11px; color:var(--silk-dim); border:1px solid var(--line); padding:4px 10px; border-radius:4px;}
+
+  /* ---------- main columns ---------- */
+  .cols{display:grid; grid-template-columns:225px 1fr 295px; gap:14px; position:relative; z-index:1;}
+  .col{display:flex; flex-direction:column; gap:14px;}
+
+  /* neutral name strips */
+  .strip{
+    background:var(--surface2); border:1px solid #000; border-radius:3px; padding:5px 8px;
+    font-family:Menlo, monospace; font-size:11px; color:#dcd9d2;
+    white-space:nowrap; overflow:hidden; box-shadow:inset 0 1px 4px rgba(0,0,0,.6);
+  }
+  .strip small{color:#6d6a64;}
+  .slot{display:flex; align-items:center; gap:6px; margin-top:6px;}
+  .slot .num{font-family:Menlo,monospace; font-size:9px; color:var(--silk-dim); width:10px;}
+  .slot .strip{flex:1;}
+  .mini{
+    width:20px; height:20px; border-radius:3px; border:1px solid var(--line2);
+    background:linear-gradient(#38383e,#2b2b30); cursor:pointer; position:relative; flex:none;
+  }
+  .mini.led::after{content:""; position:absolute; top:3px; right:3px; width:4px; height:4px; border-radius:50%; background:#5f2; box-shadow:0 0 4px #5f2;}
+  .mini.off.led::after{background:#444; box-shadow:none;}
+  .miniknob{
+    width:20px; height:20px; border-radius:50%; background:radial-gradient(circle at 35% 30%, #4a4a52, #2a2a2e);
+    border:1px solid #1a1a1c; position:relative; cursor:pointer; flex:none;
+  }
+  .miniknob::after{content:""; position:absolute; left:50%; top:2px; width:2px; height:6px; background:#ddd; transform:translateX(-50%); border-radius:1px;}
+  .btnrow{display:flex; gap:6px; margin-top:8px; align-items:center;}
+  .chip{
+    font-size:8px; letter-spacing:.15em; padding:5px 8px; border:1px solid var(--line2);
+    border-radius:3px; background:linear-gradient(#37373d,#2a2a2f); color:var(--silk); cursor:pointer;
+  }
+  .chip:active{transform:translateY(1px);}
+  .chip.lit{color:#fff; border-color:#6a5a58; background:linear-gradient(#4a3a38,#3a2c2a);}
+
+  /* master */
+  .meter{display:flex; gap:3px; height:64px; align-items:flex-end; margin-top:8px;}
+  .meter .bar{width:10px; background:#111; border:1px solid #000; height:100%; position:relative; border-radius:2px; overflow:hidden;}
+  .meter .bar i{position:absolute; bottom:0; left:0; right:0; background:linear-gradient(#e0453a,#e8c33a 18%,#3fae5a 40%,#2c7a42); height:58%;}
+  .fader{margin-top:8px; height:8px; background:#111; border:1px solid var(--line); border-radius:4px; position:relative;}
+  .fader i{position:absolute; top:-5px; left:70%; width:14px; height:18px; background:linear-gradient(#4a4a52,#303036); border:1px solid #17171a; border-radius:3px;}
+  .recbtn{margin-top:10px; display:flex; align-items:center; gap:8px; cursor:pointer;}
+  .recdot{width:12px; height:12px; border-radius:50%; background:#571d18; border:1px solid #000;}
+  .recbtn.armed .recdot{background:var(--red); box-shadow:0 0 10px var(--red-glow);}
+
+  /* ---------- PIANO ROLL ---------- */
+  .roll-wrap{background:var(--surface); border:1px solid #000; border-radius:6px; overflow:hidden; box-shadow:inset 0 2px 10px rgba(0,0,0,.6);}
+  .roll-head{display:flex; align-items:center; gap:12px; padding:6px 10px; background:#202024; border-bottom:1px solid #000;}
+  .roll-head .meta{font-family:Menlo,monospace; font-size:10px; color:#8e8b84;}
+  .roll-head .meta b{color:#dcd9d2; font-weight:400;}
+  .roll-head .toggle{font-family:Menlo,monospace; font-size:9px; color:#8e8b84; border:1px solid var(--line2); padding:2px 7px; border-radius:3px; cursor:pointer;}
+  .roll-head .toggle.on{color:#fff; background:#3a3a44; border-color:#55555f;}
+  .roll{display:grid; grid-template-columns:46px 1fr;}
+  .keys{display:flex; flex-direction:column-reverse; border-right:1px solid #000;}
+  .keyrow{height:22px; display:flex; align-items:center; justify-content:flex-end; padding-right:6px;
+    font-family:Menlo,monospace; font-size:8px; color:#77746d; background:#2e2e33; border-top:1px solid #222;}
+  .keyrow.black{background:#222226; color:#55534e;}
+  .keyrow.c{color:#c9c6bf; font-weight:700;}
+  .grid{position:relative; display:flex; flex-direction:column-reverse;}
+  .gridrow{height:22px; display:grid; grid-template-columns:repeat(16,1fr); border-top:1px solid var(--gridline);}
+  .gridrow.black .cell{background:var(--rowdark);}
+  .gridrow .cell{background:var(--rowlight); border-right:1px solid var(--gridline); cursor:pointer; position:relative;}
+  .gridrow.inscale .cell{background:var(--rowscale);}
+  .gridrow.inscale.black .cell{background:#202027;}
+  .gridrow .cell:nth-child(4n+1){border-left:1px solid var(--beatline);}
+  .gridrow .cell:hover::after{content:""; position:absolute; inset:1px; background:rgba(255,255,255,.06); border-radius:2px;}
+  .note{
+    position:absolute; height:18px; border-radius:3px; background:linear-gradient(#ff7d6a,#e85643);
+    border:1px solid var(--note-edge); box-shadow:0 1px 4px rgba(0,0,0,.5); cursor:pointer; z-index:3;
+  }
+  .note .vel{position:absolute; left:2px; bottom:2px; top:auto; width:2px; background:rgba(0,0,0,.35); border-radius:1px;}
+  .note.locked::before{content:"◆"; position:absolute; right:3px; top:1px; font-size:8px; color:#fff;}
+  .note .badge{position:absolute; right:3px; bottom:1px; font-family:Menlo,monospace; font-size:7px; color:rgba(255,255,255,.75);}
+  .note.ghost{
+    background:transparent; border:1px dashed var(--ghost); box-shadow:none;
+  }
+  .note.ghost .badge{color:var(--ghost);}
+  .playcol{position:absolute; top:0; bottom:0; width:6.25%; background:rgba(255,255,255,.07); border-left:1px solid rgba(255,255,255,.25); z-index:2; display:none;}
+
+  /* lane strip */
+  .lanetabs{display:flex; gap:4px; padding:8px 10px 0;}
+  .lanetab{
+    font-size:8px; letter-spacing:.12em; padding:4px 8px; border:1px solid var(--line);
+    border-radius:3px; color:var(--silk-dim); cursor:pointer; background:var(--panel);
+  }
+  .lanetab.on{color:#fff; background:#3a3a44; border-color:#55555f;}
+  .lane{display:grid; grid-template-columns:46px 1fr; margin-top:6px;}
+  .lane .label{font-family:Menlo,monospace; font-size:8px; color:#77746d; display:flex; align-items:center; justify-content:flex-end; padding-right:6px;}
+  .lanebars{display:grid; grid-template-columns:repeat(16,1fr); gap:0; height:52px; align-items:end; background:var(--surface2); border-top:1px solid #000;}
+  .lanebars .lb{border-right:1px solid var(--gridline); height:100%; display:flex; align-items:flex-end; cursor:ns-resize; position:relative;}
+  .lanebars .lb:nth-child(4n+1){border-left:1px solid var(--beatline);}
+  .lanebars .lb i{display:block; width:100%; margin:0 2px; background:#c9a44a; border-radius:1px 1px 0 0; opacity:.85;}
+  .lanebars .lb.mute i{background:#4a4a52; height:8% !important;}
+
+  /* pads strip */
+  .padstrip{display:grid; grid-template-columns:repeat(16,1fr); gap:6px; margin-top:12px;}
+  .padbtn{
+    height:38px; border-radius:5px; background:linear-gradient(#4e4e56,#3a3a40);
+    border:1px solid #1c1c1f; box-shadow:0 2px 0 rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.07);
+    cursor:pointer; display:flex; align-items:flex-end; justify-content:center; padding-bottom:3px;
+  }
+  .padbtn span{font-family:Menlo,monospace; font-size:7px; color:#9a9790;}
+  .padbtn:active, .padbtn.hit{transform:translateY(1px); background:linear-gradient(#6a4642,#503431); box-shadow:0 1px 0 rgba(0,0,0,.5), 0 0 10px var(--red-glow);}
+  .padbtn.cur{outline:1px solid var(--red);}
+  .padbtn.fill-pad span{color:var(--amber);}
+
+  /* ---------- GENERATE ---------- */
+  .gen-top{display:flex; gap:10px; align-items:stretch;}
+  .dice{
+    flex:1; background:linear-gradient(#3f2c2a,#2e1f1e); border:1px solid #57302c; border-radius:8px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; cursor:pointer;
+    box-shadow:0 3px 0 rgba(0,0,0,.5); padding:10px 0;
+  }
+  .dice:active{transform:translateY(2px); box-shadow:0 1px 0 rgba(0,0,0,.5);}
+  .dice .glyph{font-size:26px; color:var(--red); text-shadow:0 0 14px var(--red-glow); transition:transform .35s;}
+  .dice.rolling .glyph{transform:rotate(360deg) scale(1.25);}
+  .dice .silk{color:#c9887f;}
+  .seedbox{flex:1.2; display:flex; flex-direction:column; gap:6px;}
+  .seedrow{display:flex; gap:6px; align-items:center;}
+  .seedrow .strip{flex:1; text-align:center; font-size:12px; color:#e8e5de;}
+  .genrow{display:flex; gap:6px; margin-top:10px;}
+  .genrow .chip{flex:1; text-align:center;}
+
+  .macros{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:4px;}
+  .macro{display:flex; flex-direction:column; align-items:center; gap:6px;}
+  .knob{
+    width:52px; height:52px; border-radius:50%;
+    background:radial-gradient(circle at 34% 28%, #4e4e57, #27272b 70%);
+    border:1px solid #131316; position:relative; cursor:ns-resize;
+    box-shadow:0 3px 6px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.09);
+  }
+  .knob .ind{position:absolute; left:50%; top:4px; width:3px; height:12px; background:#e8e5de; border-radius:2px;
+    transform-origin:50% 22px; transform:translateX(-50%) rotate(-45deg); box-shadow:0 0 4px rgba(255,255,255,.4);}
+  .macro .val{font-family:Menlo,monospace; font-size:9px; color:var(--amber);}
+
+  .op{
+    display:flex; align-items:center; gap:8px; border:1px solid var(--line); border-radius:5px;
+    background:linear-gradient(#303036,#28282d); padding:6px 8px; margin-top:6px; cursor:grab;
+  }
+  .op .grip{color:#55555c; font-size:10px; letter-spacing:-1px;}
+  .op .strip{flex:1; font-size:10px; padding:3px 6px;}
+  .op .amt{font-family:Menlo,monospace; font-size:10px; color:var(--amber); width:26px; text-align:right;}
+  .op .seed-dot{width:6px; height:6px; border-radius:50%; background:#8f7ae8; box-shadow:0 0 5px rgba(143,122,232,.5); flex:none;}
+  .op.bypassed{opacity:.45;}
+  .addop{margin-top:6px; width:100%; text-align:center; font-size:9px; letter-spacing:.2em; padding:6px; border:1px dashed var(--line2); border-radius:5px; color:var(--silk-dim); cursor:pointer; background:transparent;}
+  .constraints{display:flex; gap:6px; flex-wrap:wrap; margin-top:8px;}
+  .constraints .strip{font-size:9px; padding:3px 7px;}
+
+  footer{margin-top:14px; display:flex; justify-content:space-between; align-items:center; position:relative; z-index:1;}
+  footer .silk{font-size:8px;}
+  .legend{display:flex; gap:14px; align-items:center; font-size:8px; letter-spacing:.15em; color:var(--silk-dim); text-transform:uppercase;}
+  .legend .sw{width:14px; height:9px; border-radius:2px; display:inline-block; vertical-align:middle; margin-right:5px;}
+</style>
+</head>
+<body>
+<div class="chassis">
+
+  <!-- ================= HEADER ================= -->
+  <header>
+    <div>
+      <div class="logo">ARP<em>BOX</em></div>
+      <div class="logo-sub">GENERATIVE ARP WORKSTATION</div>
+    </div>
+    <div style="display:flex; gap:6px;">
+      <div class="tbtn play" id="play">▶</div>
+      <div class="tbtn">■</div>
+      <div class="tbtn rec">●</div>
+    </div>
+    <div class="hgroup"><div class="seg" id="bpm">128.0</div><div class="silk">BPM · TAP</div></div>
+    <div class="hgroup"><div class="hval">54%</div><div class="silk">Swing</div></div>
+    <div class="hgroup"><div class="hval">F MIN</div><div class="silk">Key / Scale</div></div>
+    <div class="hgroup"><div class="hval">INT</div><div class="silk">Clock</div></div>
+    <div class="hgroup"><div class="cpu"><i></i></div><div class="silk">CPU</div></div>
+    <div class="spacer"></div>
+    <div class="proj">midnight_arps_04.arpx</div>
+  </header>
+
+  <div class="cols">
+
+    <!-- ================= LEFT : SOUND ================= -->
+    <div class="col">
+      <div class="section">
+        <div class="silk title">Sound Source</div>
+        <div class="strip">SYNTH <small>›</small> DIVA — Worn Tape Keys</div>
+        <div class="btnrow">
+          <div class="chip">EDIT</div><div class="chip">GENERIC</div><div class="chip">SWAP</div>
+          <div class="miniknob" title="gain"></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="silk title">FX Rack</div>
+        <div class="slot"><span class="num">1</span><div class="strip">ChowTape <small>· 100%</small></div><div class="mini led"></div><div class="miniknob"></div></div>
+        <div class="slot"><span class="num">2</span><div class="strip">Valhalla VVV <small>· 34%</small></div><div class="mini led"></div><div class="miniknob"></div></div>
+        <div class="slot"><span class="num">3</span><div class="strip">RC-20 Retro <small>· 61%</small></div><div class="mini led"></div><div class="miniknob"></div></div>
+        <div class="slot"><span class="num">4</span><div class="strip">Pro-Q 4 <small>· 100%</small></div><div class="mini led off"></div><div class="miniknob"></div></div>
+        <div class="slot"><span class="num">5</span><div class="strip"><small>— empty —</small></div><div class="mini"></div><div class="miniknob"></div></div>
+        <div class="slot"><span class="num">6</span><div class="strip"><small>— empty —</small></div><div class="mini"></div><div class="miniknob"></div></div>
+      </div>
+
+      <div class="section" style="flex:1;">
+        <div class="silk title">Master</div>
+        <div style="display:flex; gap:14px;">
+          <div class="meter"><div class="bar"><i></i></div><div class="bar"><i style="height:52%"></i></div></div>
+          <div style="flex:1;">
+            <div class="silk" style="margin-top:6px;">Volume</div>
+            <div class="fader"><i></i></div>
+            <div class="silk" style="margin-top:14px;">Limiter <span style="color:#5f2;">●</span></div>
+            <div class="recbtn" id="recbtn"><div class="recdot"></div><div class="silk">REC OUT → WAV</div></div>
+            <div class="chip" style="margin-top:10px; display:inline-block;">DRAG MIDI ⇱</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= CENTER : PIANO ROLL ================= -->
+    <div class="col">
+      <div class="section" style="flex:1;">
+        <div class="silk title">Sequence — Pattern A1</div>
+
+        <div class="roll-wrap">
+          <div class="roll-head">
+            <div class="meta">LEN <b>16</b> · DIV <b>1/16</b> · BAR <b>1/1</b></div>
+            <div class="toggle on" id="fold">FOLD SCALE</div>
+            <div class="toggle" id="mode">MODE: SELF</div>
+            <div style="flex:1;"></div>
+            <div class="toggle" id="xray">X-RAY</div>
+          </div>
+          <div class="roll">
+            <div class="keys" id="keys"></div>
+            <div class="grid" id="grid"><div class="playcol" id="playcol"></div></div>
+          </div>
+
+          <div class="lanetabs">
+            <div class="lanetab on">VEL</div><div class="lanetab">LEN</div><div class="lanetab">RATCH</div>
+            <div class="lanetab">MICRO</div><div class="lanetab">PROB</div><div class="lanetab">COND</div>
+            <div class="lanetab">MOD A</div><div class="lanetab">MOD B</div>
+          </div>
+          <div class="lane">
+            <div class="label">VEL</div>
+            <div class="lanebars" id="lanebars"></div>
+          </div>
+        </div>
+
+        <div class="padstrip" id="pads"></div>
+      </div>
+    </div>
+
+    <!-- ================= RIGHT : GENERATE ================= -->
+    <div class="col">
+      <div class="section">
+        <div class="silk title">Generate</div>
+        <div class="gen-top">
+          <div class="dice" id="dice"><div class="glyph">⚄</div><div class="silk">Dice</div></div>
+          <div class="seedbox">
+            <div class="silk" style="text-align:center;">Seed</div>
+            <div class="seedrow">
+              <div class="chip">◀</div>
+              <div class="strip" id="seed">7F3A-90C2</div>
+              <div class="chip">▶</div>
+            </div>
+            <div class="silk" style="text-align:center;">History 12 / 64</div>
+          </div>
+        </div>
+        <div class="genrow">
+          <div class="chip lit">A</div><div class="chip">B</div>
+          <div class="chip">COMMIT</div><div class="chip lit">LOOP LOCK</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="silk title">Macros</div>
+        <div class="macros">
+          <div class="macro"><div class="knob"><div class="ind"></div></div><div class="silk">Chaos</div><div class="val">32</div></div>
+          <div class="macro"><div class="knob"><div class="ind" style="transform:translateX(-50%) rotate(20deg)"></div></div><div class="silk">Density</div><div class="val">61</div></div>
+          <div class="macro"><div class="knob"><div class="ind" style="transform:translateX(-50%) rotate(-90deg)"></div></div><div class="silk">Motion</div><div class="val">14</div></div>
+          <div class="macro"><div class="knob"><div class="ind" style="transform:translateX(-50%) rotate(60deg)"></div></div><div class="silk">Shape</div><div class="val">75</div></div>
+        </div>
+      </div>
+
+      <div class="section" style="flex:1;">
+        <div class="silk title">Operator Stack</div>
+        <div class="op"><span class="grip">⠿</span><div class="strip">TURING</div><div class="seed-dot"></div><div class="amt">64</div></div>
+        <div class="op"><span class="grip">⠿</span><div class="strip">DICE <small>· vel len</small></div><div class="seed-dot"></div><div class="amt">30</div></div>
+        <div class="op"><span class="grip">⠿</span><div class="strip">RATCHETIZER</div><div class="seed-dot"></div><div class="amt">18</div></div>
+        <div class="op bypassed"><span class="grip">⠿</span><div class="strip">EVOLVE <small>· 4 bars</small></div><div class="seed-dot"></div><div class="amt">25</div></div>
+        <div class="op"><span class="grip">⠿</span><div class="strip">HUMANIZE</div><div class="seed-dot"></div><div class="amt">12</div></div>
+        <div class="addop">+ ADD OPERATOR</div>
+
+        <div class="silk" style="margin-top:12px;">Constraints</div>
+        <div class="constraints">
+          <div class="strip">F MINOR · SNAP</div>
+          <div class="strip">RANGE F2–C5</div>
+          <div class="strip">MAX 4 / BEAT</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="silk">ARPBOX · MIDNIGHT PANEL · MOCKUP V0.4</div>
+    <div class="legend">
+      <span><i class="sw" style="background:linear-gradient(#ff7d6a,#e85643);"></i>Punched note</span>
+      <span><i class="sw" style="border:1px dashed var(--ghost);"></i>Generated (uncommitted)</span>
+      <span><i class="sw" style="background:#4a4a52;"></i>◆ = anchor lock</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+  // ---- build keyboard + grid (F2..C4 range shown, F minor scale) ----
+  const NOTE_NAMES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const FMIN=new Set([5,7,8,10,0,1,3]); // F G Ab Bb C Db Eb
+  const LOW=41, HIGH=60; // F2..C4 -> 20 rows
+  const keysEl=document.getElementById('keys'), gridEl=document.getElementById('grid');
+  const rows=[];
+  for(let m=LOW;m<=HIGH;m++){
+    const pc=m%12, name=NOTE_NAMES[pc]+(Math.floor(m/12)-1);
+    const isBlack=name.includes('#');
+    const k=document.createElement('div');
+    k.className='keyrow'+(isBlack?' black':'')+(pc===0?' c':'');
+    k.textContent=name;
+    keysEl.appendChild(k);
+    const r=document.createElement('div');
+    r.className='gridrow'+(isBlack?' black':'')+(FMIN.has(pc)?' inscale':'');
+    r.dataset.midi=m;
+    for(let c=0;c<16;c++){
+      const cell=document.createElement('div');
+      cell.className='cell'; cell.dataset.col=c; cell.dataset.midi=m;
+      cell.onclick=()=>addNote(m,c,1,false);
+      r.appendChild(cell);
+    }
+    gridEl.appendChild(r);
+  }
+
+  // ---- notes ----
+  // {midi, col, len, ghost, locked, badge}
+  const seedNotes=[
+    {midi:41,col:0,len:2,locked:true},          // F2
+    {midi:48,col:2,len:1},                      // C3
+    {midi:53,col:4,len:1},                      // F3
+    {midi:56,col:5,len:1,badge:'75%'},          // Ab3
+    {midi:60,col:6,len:2},                      // C4
+    {midi:55,col:9,len:1,badge:'3:4'},          // G3
+    {midi:53,col:10,len:1},                     // F3
+    {midi:48,col:12,len:3,locked:true},         // C3
+    // generated (ghost) notes from the operator stack
+    {midi:58,col:7,len:1,ghost:true,badge:'TUR'},
+    {midi:51,col:11,len:1,ghost:true,badge:'DICE'},
+    {midi:60,col:14,len:1,ghost:true,badge:'TUR'},
+    {midi:56,col:15,len:1,ghost:true,badge:'RAT'},
+  ];
+  let notes=[];
+  function rowIndex(midi){return midi-LOW;}
+  function renderNotes(){
+    document.querySelectorAll('.note').forEach(n=>n.remove());
+    const gh=gridEl.getBoundingClientRect().height;
+    notes.forEach((n,i)=>{
+      const el=document.createElement('div');
+      el.className='note'+(n.ghost?' ghost':'')+(n.locked?' locked':'');
+      el.style.left=(n.col*6.25)+'%';
+      el.style.width=(n.len*6.25-0.4)+'%';
+      el.style.bottom=(rowIndex(n.midi)*22+2)+'px';
+      if(n.badge) el.innerHTML='<span class="badge">'+n.badge+'</span>';
+      el.onclick=(e)=>{e.stopPropagation(); notes.splice(i,1); renderNotes(); renderLane();};
+      gridEl.appendChild(el);
+    });
+  }
+  function addNote(midi,col,len,ghost){
+    const hit=notes.findIndex(n=>n.midi===midi&&col>=n.col&&col<n.col+n.len);
+    if(hit>=0){notes.splice(hit,1);} else {notes.push({midi,col,len,ghost});}
+    renderNotes(); renderLane();
+  }
+
+  // ---- velocity lane ----
+  const laneEl=document.getElementById('lanebars');
+  function renderLane(){
+    laneEl.innerHTML='';
+    for(let c=0;c<16;c++){
+      const active=notes.filter(n=>n.col===c);
+      const lb=document.createElement('div');
+      lb.className='lb'+(active.length?'':' mute');
+      const i=document.createElement('i');
+      i.style.height=(active.length? (30+((c*37)%60)) : 8)+'%';
+      if(active.some(n=>n.ghost)) i.style.background='#8f7ae8';
+      lb.appendChild(i); laneEl.appendChild(lb);
+    }
+  }
+
+  // ---- pads ----
+  const pads=document.getElementById('pads');
+  for(let i=0;i<16;i++){
+    const p=document.createElement('div');
+    p.className='padbtn'+(i===0?' cur':'')+(i===15?' fill-pad':'');
+    p.innerHTML=`<span>${i===15?'FILL':'A'+(i+1)}</span>`;
+    p.onmousedown=()=>{p.classList.add('hit'); setTimeout(()=>p.classList.remove('hit'),150);};
+    pads.appendChild(p);
+  }
+
+  // ---- transport / playhead ----
+  let playing=false, ph=0, timer=null;
+  const playBtn=document.getElementById('play'), playcol=document.getElementById('playcol');
+  playBtn.onclick=()=>{
+    playing=!playing; playBtn.classList.toggle('on',playing);
+    playcol.style.display=playing?'block':'none';
+    if(playing){ timer=setInterval(()=>{ playcol.style.left=((ph%16)*6.25)+'%'; ph++; }, 60000/128/4); }
+    else{ clearInterval(timer); ph=0; }
+  };
+
+  // ---- dice: re-roll only ghost (generated) notes; locked+punched notes stay ----
+  const dice=document.getElementById('dice'), seedEl=document.getElementById('seed');
+  const glyphs=['⚀','⚁','⚂','⚃','⚄','⚅'];
+  const scaleMidis=[]; for(let m=LOW;m<=HIGH;m++) if(FMIN.has(m%12)) scaleMidis.push(m);
+  dice.onclick=()=>{
+    dice.classList.add('rolling'); setTimeout(()=>dice.classList.remove('rolling'),380);
+    dice.querySelector('.glyph').textContent=glyphs[Math.floor(Math.random()*6)];
+    seedEl.textContent=(Math.random()*0xFFFF|0).toString(16).toUpperCase().padStart(4,'0')+'-'+(Math.random()*0xFFFF|0).toString(16).toUpperCase().padStart(4,'0');
+    notes=notes.filter(n=>!n.ghost);
+    const tags=['TUR','DICE','RAT'];
+    const count=2+Math.floor(Math.random()*3);
+    for(let i=0;i<count;i++){
+      const col=Math.floor(Math.random()*16);
+      const midi=scaleMidis[Math.floor(Math.random()*scaleMidis.length)];
+      if(!notes.some(n=>n.midi===midi&&n.col===col))
+        notes.push({midi,col,len:1,ghost:true,badge:tags[Math.floor(Math.random()*tags.length)]});
+    }
+    renderNotes(); renderLane();
+  };
+
+  // ---- toggles ----
+  ['fold','mode','xray'].forEach(id=>{
+    document.getElementById(id).onclick=e=>e.target.classList.toggle('on');
+  });
+  document.getElementById('recbtn').onclick=e=>e.currentTarget.classList.toggle('armed');
+  document.querySelectorAll('.lanetab').forEach(t=>t.onclick=()=>{
+    document.querySelectorAll('.lanetab').forEach(x=>x.classList.remove('on')); t.classList.add('on');
+  });
+
+  notes=seedNotes.slice();
+  renderNotes(); renderLane();
+</script>
+</body>
+</html>

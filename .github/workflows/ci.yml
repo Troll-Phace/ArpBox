@@ -1,0 +1,173 @@
+name: CI
+
+# ARPBOX continuous integration (docs/INSTRUCTIONS.md Phase 1.3).
+# configure -> universal build -> ctest -> ad-hoc codesign verify.
+# Real Developer ID signing + notarization require secrets not yet configured;
+# the `notarize` job is a documented placeholder gated on release refs.
+
+on:
+  # Restrict push to the branches CI must cover directly. Same-repo PR branches
+  # are covered by the `pull_request` trigger; listing "**" here would double-run
+  # them. `release/**` is kept so the notarize job's ref gate still fires.
+  push:
+    branches: ["main", "phase/**", "fix/**", "release/**"]
+    tags: ["v*"]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build (universal) + test + ad-hoc sign
+    runs-on: macos-14
+    env:
+      # Ad-hoc identity: correct for CI without signing secrets. A release
+      # pipeline overrides this via -DARPBOX_CODESIGN_IDENTITY=... with secrets.
+      ARPBOX_CODESIGN_IDENTITY: "-"
+    steps:
+      - name: Checkout (with JUCE submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Show toolchain
+        run: |
+          cmake --version
+          ninja --version
+          xcodebuild -version || true
+          echo "SDK: $(xcrun --show-sdk-path)"
+
+      - name: Enforce engine GUI-free
+        # Belt-and-suspenders gate: engine/ must compile with zero UI deps
+        # (ARCHITECTURE §1.3). A CTest equivalent also runs; this dedicated
+        # blocking step gives a clearer, order-independent failure signal.
+        run: |
+          if grep -rEn '#include[ \t]*[<"]juce_(gui_basics|gui_extra|graphics)' engine/; then
+            echo "::error::engine/ must not depend on JUCE GUI modules"; exit 1
+          fi
+
+      - name: Configure (Ninja, universal, RelWithDebInfo)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DARPBOX_CODESIGN_IDENTITY="${ARPBOX_CODESIGN_IDENTITY}"
+
+      - name: Build (both arches)
+        run: cmake --build build
+
+      - name: Test (contract suites)
+        # Contract per task 1.2: unit | determinism | midi-conformance |
+        # hosting-lab | perf-budget, all registered with CTest.
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Verify universal binary
+        run: |
+          APP="build/app/ARPBOX_artefacts/RelWithDebInfo/ARPBOX.app"
+          BIN="$APP/Contents/MacOS/ARPBOX"
+          lipo -info "$BIN"
+          lipo -archs "$BIN" | grep -q "arm64"  || { echo "::error::missing arm64 slice";  exit 1; }
+          lipo -archs "$BIN" | grep -q "x86_64" || { echo "::error::missing x86_64 slice"; exit 1; }
+
+      - name: Verify ad-hoc signing (Hardened Runtime + entitlements)
+        # The build POST_BUILD step already signs the app (--options runtime
+        # --entitlements). Here we assert the result so a signing regression
+        # fails CI rather than shipping an unhardened / un-entitled app.
+        run: |
+          APP="build/app/ARPBOX_artefacts/RelWithDebInfo/ARPBOX.app"
+          codesign -dv --verbose=4 "$APP" 2>&1 | tee /tmp/cs.txt
+          grep -q "flags=.*runtime" /tmp/cs.txt \
+            || { echo "::error::Hardened Runtime flag missing"; exit 1; }
+          codesign -d --entitlements - "$APP" 2>&1 | tee /tmp/ent.txt
+          grep -q "com.apple.security.cs.disable-library-validation" /tmp/ent.txt \
+            || { echo "::error::disable-library-validation entitlement missing"; exit 1; }
+          codesign --verify --strict --verbose=2 "$APP"
+
+      - name: Upload app artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARPBOX-app-adhoc
+          path: build/app/ARPBOX_artefacts/RelWithDebInfo/ARPBOX.app
+          if-no-files-found: error
+
+  lint:
+    name: clang-tidy (single-arch DB, non-blocking)
+    runs-on: macos-14
+    # Optional per task 1.3. Non-blocking: tidy findings should not gate the
+    # build while the tree is still a scaffold.
+    continue-on-error: true
+    steps:
+      - name: Checkout (with JUCE submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install tools
+        run: brew install ninja llvm
+
+      - name: Configure single-arch compile DB
+        # clang-tidy chokes on the universal build's dual -arch flags, so build
+        # the compile_commands.json for a SINGLE arch (arm64). Homebrew clang
+        # also needs an explicit -isysroot (passed at lint time). (task 1.1)
+        run: |
+          cmake -B build-tidy -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_OSX_ARCHITECTURES="arm64" \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Run clang-tidy on ARPBOX sources
+        run: |
+          TIDY="$(brew --prefix llvm)/bin/clang-tidy"
+          SYSROOT="$(xcrun --show-sdk-path)"
+          "$TIDY" --version
+          # Derive the source list from git so Phase 2+ files are linted
+          # automatically (no hardcoded file list to keep in sync).
+          for f in $(git ls-files 'app/*.cpp' 'engine/*.cpp' 'hosting/*.cpp' 'ui/*.cpp' 'scanner-helper/*.cpp'); do
+            echo "== clang-tidy $f =="
+            # No `|| true`: keep WarningsAsErrors meaningful. The job-level
+            # continue-on-error keeps this non-blocking for now.
+            "$TIDY" -p build-tidy "$f" --extra-arg=-isysroot --extra-arg="$SYSROOT"
+          done
+
+  notarize:
+    name: Notarize (release refs — STUB)
+    runs-on: macos-14
+    needs: build-and-test
+    # Only release tags (v*) or release/* branches. This job is a documented
+    # placeholder: real Developer ID signing + notarization need secrets that
+    # are NOT yet configured. It intentionally does not perform notarization.
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/')
+    steps:
+      - name: Notarization placeholder
+        run: |
+          echo "==============================================================="
+          echo " NOTARIZATION STUB — not yet implemented (Phase 1.3)."
+          echo " Enable once these repo secrets exist:"
+          echo "   - APPLE_DEV_ID_APP_CERT_P12  (base64 Developer ID .p12)"
+          echo "   - APPLE_DEV_ID_APP_CERT_PWD  (.p12 password)"
+          echo "   - APPLE_NOTARY_APPLE_ID / APPLE_NOTARY_TEAM_ID / APPLE_NOTARY_PWD"
+          echo "---------------------------------------------------------------"
+          echo " Intended flow:"
+          echo "   1. import .p12 into a temporary keychain"
+          echo "   2. rebuild with -DARPBOX_CODESIGN_IDENTITY=\"Developer ID Application: ... (TEAMID)\""
+          echo "   3. codesign --options runtime --entitlements packaging/ArpBox.entitlements --timestamp"
+          echo "   4. ditto -c -k --keepParent ARPBOX.app ARPBOX.zip"
+          echo "   5. xcrun notarytool submit ARPBOX.zip --apple-id ... --team-id ... --password ... --wait"
+          echo "   6. xcrun stapler staple ARPBOX.app"
+          echo "==============================================================="
+          # Guarded so the presence check is visible but nothing runs without secrets.
+          # SECURITY (Phase 22): when notarization is implemented, secrets MUST be
+          # passed to the step via an `env:` block and referenced as shell env vars
+          # ($APPLE_NOTARY_APPLE_ID), NEVER spliced into `run:` text as
+          # ${{ secrets.* }} — direct interpolation is a shell script-injection
+          # vector. The presence check below is inert (compares against empty)
+          # and does not print or use the secret value.
+          if [ -z "${{ secrets.APPLE_NOTARY_APPLE_ID }}" ]; then
+            echo "No notarization secrets configured — skipping (expected)."
+          fi

@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(git status)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(gh issue *)",
+      "Bash(gh label *)",
+      "Bash(gh api *)",
+      "Bash(gh pr *)",
+      "Bash(cmake -B build *)",
+      "Bash(cmake --build build *)",
+      "Bash(ctest --test-dir build *)",
+      "Bash(ninja -C build *)",
+      "Bash(clang-format *)",
+      "Bash(clang-tidy *)",
+      "Bash(codesign -dv *)",
+      "Bash(auval *)",
+      "Bash(pluginval *)"
+    ],
+    "deny": [
+      "Bash(sudo *)",
+      "Bash(rm -rf /)",
+      "Bash(rm -rf /*)",
+      "Bash(: > *)",
+      "Bash(chmod 777 *)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat .claude/state/progress.md 2>/dev/null || echo 'No progress file yet.'",
+            "statusMessage": "Loading phase progress..."
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gh issue list --state open --json number,title,labels,milestone --template '{{range .}}#{{.number}} {{.title}} [{{range .labels}}{{.name}} {{end}}]{{\"\\n\"}}{{end}}' 2>/dev/null | head -40 || echo 'No open issues or gh not authenticated.'",
+            "statusMessage": "Loading open issue backlog..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "file=$(cat /dev/stdin | jq -r '.tool_input.file_path // empty'); case \"$file\" in *.cpp|*.h|*.hpp|*.mm) clang-format -i \"$file\" 2>/dev/null;; esac; exit 0",
+            "statusMessage": "Auto-formatting C++..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "file=$(cat /dev/stdin | jq -r '.tool_input.file_path // empty'); case \"$file\" in *.env*|*secret*|*credential*|*Signing.entitlements|*.lock|*-lock.*) echo \"Protected file: $file\" >&2; exit 2;; esac; exit 0"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo \"- $(date +'%Y-%m-%d %H:%M'): Session ended\" >> .claude/state/progress.md 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
