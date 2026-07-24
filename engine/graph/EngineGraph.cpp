@@ -7,6 +7,14 @@ namespace arpbox::engine
 namespace
 {
     constexpr int numStereoChannels = 2;
+
+    // Placeholder audio config applied in buildGraph purely so the graph reports a
+    // non-zero OUTPUT channel count BEFORE the IO nodes are added (see buildGraph).
+    // The real values arrive later from the app's AudioProcessorPlayer (and the
+    // headless prepareToPlay). The output channel count stays 2 across those
+    // re-configurations, so the connections wired in buildGraph persist.
+    constexpr double placeholderSampleRate = 44100.0;
+    constexpr int placeholderBlockSize = 512;
 } // namespace
 
 // MESSAGE-THREAD ONLY:
@@ -21,6 +29,22 @@ void EngineGraph::buildGraph ()
     using IOProcessor = juce::AudioProcessorGraph::AudioGraphIOProcessor;
 
     graph.clear ();
+
+    // CRITICAL: configure the graph's channel count BEFORE adding any node.
+    // `AudioGraphIOProcessor::setParentGraph` derives the audioOutputNode's INPUT
+    // channel count from `graph.getTotalNumOutputChannels()` AT addNode time. With
+    // the graph still at its default 0/0, audioOutputNode would be created with ZERO
+    // input channels, and every `Master → audioOut` connection below would be
+    // silently rejected by `isConnectionLegal` (destChannel < 0 inputs is false).
+    // The Master would still meter its own signal (it stays in the render sequence),
+    // but its output would reach nothing → the device receives pure SILENCE. Setting
+    // 2 output channels here makes those connections legal. SR/block are placeholders
+    // (the player / prepareToPlay re-set them with real values; output stays 2, so
+    // the connections persist).
+    graph.setPlayConfigDetails (numStereoChannels,
+                                numStereoChannels,
+                                placeholderSampleRate,
+                                placeholderBlockSize);
 
     // IO nodes. audioOutput is the sink; audioInput and the graph's own midiInput
     // IO node are added for topology completeness and stay unconnected (hardware
@@ -57,12 +81,22 @@ void EngineGraph::buildGraph ()
 
     // Wire TestTone → Master → audioOutput as stereo pairs. The tone edge is kept
     // as a debug fallback source (tone off by default); a set synth sums into the
-    // same Master input.
+    // same Master input. These connections are load-bearing for ALL audible output —
+    // assert they take (a silent rejection here is the "device gets silence" bug),
+    // never ignore the return value.
     for (int ch = 0; ch < numStereoChannels; ++ch)
-        graph.addConnection ({ { toneNode->nodeID, ch }, { masterNodeId, ch } });
+    {
+        [[maybe_unused]] const bool toneWired =
+            graph.addConnection ({ { toneNode->nodeID, ch }, { masterNodeId, ch } });
+        jassert (toneWired);
+    }
 
     for (int ch = 0; ch < numStereoChannels; ++ch)
-        graph.addConnection ({ { masterNodeId, ch }, { audioOutNode->nodeID, ch } });
+    {
+        [[maybe_unused]] const bool outputWired =
+            graph.addConnection ({ { masterNodeId, ch }, { audioOutNode->nodeID, ch } });
+        jassert (outputWired);
+    }
 }
 
 // MESSAGE-THREAD ONLY:

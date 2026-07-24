@@ -163,6 +163,44 @@ TEST_CASE ("graph/engine-graph: safety limiter bounds a hot signal", "[unit]")
     REQUIRE (unlimitedPeak > 2.0f); // demonstrably unbounded without the limiter
 }
 
+TEST_CASE ("graph/engine-graph: master output reaches the graph OUTPUT buffer (audible)", "[unit]")
+{
+    // REGRESSION (latent since Phase 2): buildGraph must configure the graph's
+    // channel count BEFORE adding the audioOutputNode. Otherwise audioOutputNode is
+    // created with 0 input channels, `Master → audioOut` is silently rejected, and
+    // the DEVICE receives pure silence while the Master EngineSnapshot meter still
+    // shows signal. Every other graph test asserts the METER proxy, which stays
+    // green with the output disconnected — so this asserts the ACTUAL OUTPUT BUFFER,
+    // the signal that reaches the device. It MUST fail without the buildGraph fix.
+    EngineGraph graph;
+
+    // Mimic the APP path precisely: the AudioProcessorPlayer configures the graph as
+    // 0-in / 2-out at the device SR/block before preparing. This also proves the
+    // Master→audioOut edges survive that reconfigure (output count stays 2).
+    auto& processor = graph.getProcessor ();
+    processor.setPlayConfigDetails (0, 2, 48000.0, 128);
+    processor.prepareToPlay (48000.0, 128);
+
+    juce::AudioBuffer<float> buffer (2, 128);
+    juce::MidiBuffer midi;
+
+    REQUIRE (graph.commands ().push (toneCommand (true)));
+
+    float outputPeak = 0.0f;
+    for (int i = 0; i < 16; ++i)
+    {
+        buffer.clear ();
+        processor.processBlock (buffer, midi);
+        REQUIRE (allFinite (buffer));
+        outputPeak = juce::jmax (outputPeak, buffer.getMagnitude (0, buffer.getNumSamples ()));
+    }
+
+    // The tone must be present in the graph's OUTPUT buffer (= the device), not just
+    // in the mid-graph Master meter. A disconnected audioOutput leaves this at 0.
+    REQUIRE (outputPeak > 0.0f);
+    REQUIRE (outputPeak <= 1.0001f); // safety limiter keeps it inside the ceiling
+}
+
 TEST_CASE ("graph/engine-graph: processes at multiple block sizes without crashing", "[unit]")
 {
     for (const int blockSize : { 32, 128, 512 })
