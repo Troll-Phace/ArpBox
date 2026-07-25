@@ -51,6 +51,15 @@ HostedPluginNode::HostedPluginNode (std::unique_ptr<juce::AudioPluginInstance> p
     // latency after prepare propagates to the graph.
     inner->addListener (this);
 
+    // PLAYHEAD OWNERSHIP (§3.3). From here on the wrapper is the SOLE writer of the
+    // inner's playhead pointer, and the invariant is: while this node is prepared,
+    // `inner->getPlayHead() == this->getPlayHead()`; otherwise the inner's is null.
+    // Seed it now so we start from a known state rather than inheriting whatever the
+    // instantiator happened to leave on the instance. Our own playhead is still null
+    // at construction (the graph has not adopted us yet), so in practice this CLEARS
+    // the inner — which is the correct pre-graph state and what plugins expect.
+    inner->setPlayHead (getPlayHead ());
+
     // Seed the bus layout + latency now so the node is graph-ready before its first
     // prepareToPlay. Re-prepare of the inner happens in prepareToPlay at the graph's
     // authoritative SR/block.
@@ -65,7 +74,15 @@ HostedPluginNode::~HostedPluginNode ()
     // Nothing to tear down for the deferred-latency path — it is a plain atomic flag
     // with no scheduled callback that could outlive us.
     if (inner != nullptr)
+    {
+        // Drop the borrowed playhead before the instance goes away. The graph never
+        // clears a removed node's playhead, and the pointer we were handed belongs to
+        // the player/transport, NOT to us — so leaving it installed on an instance
+        // that could outlive the graph (or be released out of this wrapper by a future
+        // swap path) is a dangling-pointer bug waiting to happen. One pointer store.
+        inner->setPlayHead (nullptr);
         inner->removeListener (this);
+    }
 }
 
 //==============================================================================
@@ -153,6 +170,15 @@ void HostedPluginNode::prepareToPlay (double sampleRate, int maximumExpectedSamp
 
         // Forward the (possibly updated) latency to the graph.
         setLatencySamples (inner->getLatencySamples ());
+
+        // Re-seed the inner's playhead (§3.3). Pairs with the clear in
+        // releaseResources() so the invariant holds across a release/prepare cycle
+        // rather than leaving the inner null until its first rendered block. The graph
+        // re-sets ours before EVERY block anyway, so this only matters for a plugin
+        // that reads getPlayHead() outside its own processBlock (some do, to show
+        // tempo in their editor). NOTE: the pointer is only as good as what the graph
+        // last gave us — see setPlayHead() below for the lifetime caveat.
+        inner->setPlayHead (getPlayHead ());
     }
 
     // Arm the ramps. Fade seeds at its resting target so a node the coordinator has
@@ -179,7 +205,16 @@ void HostedPluginNode::releaseResources ()
 {
     // MESSAGE-THREAD ONLY.
     if (inner != nullptr)
+    {
+        // Drop the borrowed playhead FIRST. releaseResources is the "no longer part of
+        // a running graph" signal (graph release / node removal), after which the
+        // object the graph pointed us at may already be gone — and JUCE's graph never
+        // clears a node's playhead itself. Null is the safe resting state: every
+        // plugin must cope with a null playhead, and the graph re-sets ours before
+        // every block, so prepareToPlay/setPlayHead restore it long before we render.
+        inner->setPlayHead (nullptr);
         inner->releaseResources ();
+    }
 
     lastPreparedSampleRate = 0.0;
     lastPreparedBlockSize = 0;
@@ -268,6 +303,37 @@ void HostedPluginNode::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         for (int i = 0; i < numSamples; ++i)
             samples[i] = std::isfinite (samples[i]) ? samples[i] : 0.0f;
     }
+}
+
+//==============================================================================
+void HostedPluginNode::setPlayHead (juce::AudioPlayHead* newPlayHead)
+{
+    // RT-SAFE — and it has to be, because this runs on the AUDIO THREAD. The graph's
+    // render sequence does `processor.setPlayHead (c.audioPlayHead)` for EVERY node at
+    // the top of EVERY block (juce_AudioProcessorGraph.cpp), passing the graph's own
+    // getPlayHead(). That reaches the WRAPPER only; the graph has no idea we own an
+    // inner instance, so `inner->getPlayHead()` would stay null forever and a hosted
+    // synth's tempo-synced LFOs/delays would never see tempo/PPQ (§3.3; Phase 5
+    // criterion "hosted fake plugin observes correct BPM/PPQ via AudioPlayHead").
+    //
+    // Both stores are plain pointer assignments — AudioProcessor::setPlayHead is
+    // literally `playHead = newPlayHead;` — so there is nothing to allocate, lock or
+    // publish here. Deliberately NOT an atomic: this is the same thread that renders,
+    // and the write always lands before the processBlock that reads it. `inner` is
+    // seated once in the constructor and released only at destruction, so reading it
+    // is the same access processBlock already makes.
+    //
+    // LIFETIME CAVEAT (not fixable here — see the report): we forward a BORROWED
+    // pointer we do not own. If the graph's playhead is short-lived (e.g. the
+    // per-callback stack PlayHead that AudioProcessorPlayer installs when the graph
+    // has none of its own), the inner holds a stale pointer BETWEEN callbacks. Safe
+    // for rendering — this is re-set before each block — but the reason ARPBOX's
+    // transport must install one long-lived AudioPlayHead on the graph (§3.3), which
+    // also suppresses the player's stack playhead.
+    juce::AudioProcessor::setPlayHead (newPlayHead);
+
+    if (inner != nullptr)
+        inner->setPlayHead (newPlayHead);
 }
 
 //==============================================================================

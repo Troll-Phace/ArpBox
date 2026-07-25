@@ -5,7 +5,9 @@
 #include "EngineCommand.h"
 #include "EngineEvent.h"
 #include "EngineSnapshotBuffer.h"
+#include "ICommandSink.h"
 #include "ToneControl.h"
+#include "Transport.h"
 
 #include <juce_audio_processors_headless/juce_audio_processors_headless.h>
 #include <juce_dsp/juce_dsp.h>
@@ -18,17 +20,25 @@ namespace arpbox::engine
 /** Master-section graph node: the last processor before the audio-output node
     (ARCHITECTURE §7). Signal chain, in order, per `processBlock`:
 
-        drain EngineCommandQueue → INPUT NaN/Inf scrub → output gain
-        → safety limiter (default ON) → OUTPUT NaN/Inf scrub (graph boundary)
-        → meter tap → publish EngineSnapshot
+        INPUT NaN/Inf scrub → output gain → safety limiter (default ON)
+        → OUTPUT NaN/Inf scrub (graph boundary) → meter tap
+        → publish EngineSnapshot
 
-    COMMAND DRAIN (Phase-2 arrangement — TEMPORARY): the master is the SINGLE
-    consumer of the shared `EngineCommandQueue`. It drains at the top of its block
-    and dispatches by type: master-gain / limiter-enable are applied to itself
-    here; the two test-tone commands are written into the shared `ToneControl`
-    atomics that the (earlier-processed) tone source reads next block. This
-    head-of-engine drain migrates to the transport/arp head node in Phase 5; the
-    master then owns only gain/limiter/metering.
+    COMMANDS (Phase 5.1 arrangement): the master no longer drains the command
+    queue. `TransportProcessor` — the graph's head node — is now the queue's SOLE
+    consumer and fans every command out to the registered `ICommandSink`s, of which
+    this node is one. `applyCommand` therefore runs on the SAME audio thread,
+    strictly EARLIER in the SAME device callback (the head node renders before this
+    one), so mutating `outputGain` / `limiterEnabled` from it is safe and takes
+    effect in the block it was drained in — no longer one block late.
+    The `ToneControl` atomic shim survives for the tone commands this node still
+    forwards; see ToneControl.h for why (the tone node's render order is
+    unconstrained, so it is not guaranteed to run after the head node).
+
+    SNAPSHOT WRITER: the master runs LAST in the render sequence, so it sees the
+    finished block — it stays the single writer of `EngineSnapshot`, and from
+    Phase 5.1 it also copies the transport's latched block-start PPQ / BPM / play
+    state out of the injected `Transport`.
 
     NaN/Inf SCRUB (defense-in-depth, issue #3): TWO scrubs. The INPUT scrub (before
     gain/limiter) protects `dsp::Limiter` — one non-finite input sample poisons its
@@ -40,7 +50,8 @@ namespace arpbox::engine
 
     All sample-rate-dependent DSP state (`dsp::Gain`, `dsp::Limiter`) is prepared
     ONLY in `prepareToPlay`; `processBlock` never allocates, locks, or re-prepares. */
-class MasterProcessor : public juce::AudioProcessor
+class MasterProcessor : public juce::AudioProcessor,
+                        public ICommandSink
 {
 public:
     /** Constructs the node with stereo input and stereo output buses. */
@@ -49,15 +60,21 @@ public:
     /** ~MasterProcessor. */
     ~MasterProcessor () override = default;
 
-    // MESSAGE-THREAD ONLY: wiring. Injects the graph-owned cross-thread channels
-    // and shared tone control. Call once, before the node joins the graph and
-    // before playback. All pointers must outlive this node.
-    /** Wires the shared command queue (drained by this node), the snapshot buffer
-        (written by this node each block), and the tone control (published to by
-        this node when it drains tone commands). */
-    void setSharedState (EngineCommandQueue* commands,
-                         EngineSnapshotBuffer* snapshots,
-                         ToneControl* tone) noexcept;
+    // MESSAGE-THREAD ONLY: wiring. Injects the graph-owned snapshot buffer and
+    // shared tone control. Call once, before the node joins the graph and before
+    // playback. All pointers must outlive this node.
+    /** Wires the snapshot buffer (written by this node each block) and the tone
+        control (published to when this node is handed a tone command). The command
+        QUEUE is deliberately absent: `TransportProcessor` owns the drain and calls
+        `applyCommand` on this node (see the class comment). */
+    void setSharedState (EngineSnapshotBuffer* snapshots, ToneControl* tone) noexcept;
+
+    // MESSAGE-THREAD ONLY: wiring. Injects the transport whose LATCHED block-start
+    // values are copied into every published snapshot. Non-owning; must outlive this
+    // node. The master renders after the transport head node, so the values it reads
+    // belong to the CURRENT block.
+    /** Sets the transport surfaced through `EngineSnapshot.ppqPosition/bpm/isPlaying`. */
+    void setTransportSource (const Transport* source) noexcept { transportSource = source; }
 
     // MESSAGE-THREAD ONLY: wiring. Injects the engine→UI event queue this node
     // produces onto (the AUDIO thread is that queue's SOLE producer — see
@@ -142,15 +159,24 @@ public:
     /** No persisted state yet. */
     void setStateInformation (const void*, int) override {}
 
-private:
-    // RT-SAFE: applies one drained command. Called from processBlock's drain loop.
-    void applyCommand (const EngineCommand& command) noexcept;
+    // ── ICommandSink ─────────────────────────────────────────────────────────
 
+    // RT-SAFE: audio thread. Invoked from `TransportProcessor::processBlock` — the
+    // SAME audio thread, strictly earlier in the SAME device callback — so mutating
+    // this node's DSP state here is safe and lands in the current block. Ignores
+    // every command type the master does not own.
+    /** Applies master gain / limiter-enable to this node and forwards the two tone
+        commands into the shared `ToneControl`; ignores all other types. */
+    void applyCommand (const EngineCommand& command) noexcept override;
+
+private:
     // Injected, non-owning cross-thread channels (graph-owned).
-    EngineCommandQueue* commandQueue = nullptr;   ///< Drained by this node (SPSC consumer).
     EngineSnapshotBuffer* snapshotBuffer = nullptr;///< Written by this node each block.
     ToneControl* toneControl = nullptr;            ///< Published to on tone commands.
     EngineEventQueue* eventQueue = nullptr;        ///< Produced onto by this node (latencyChanged).
+
+    // Transport source for the snapshot's transport fields (read-only, same thread).
+    const Transport* transportSource = nullptr;
 
     // Latency reporting: poll the source's latency on the audio thread and emit a
     // latencyChanged event only when it changes. `-1` forces one report on the

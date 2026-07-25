@@ -68,6 +68,33 @@ add_executable(arpbox_tests
     fakes/HostedSynthGraphSupport.h
     hosted_node_unit.cpp
     midi_input_node.cpp
+    # Phase 5.1 transport: exact/drift-free PPQ, buffer-size independence, tempo and
+    # stop/locate command handling, head-node render ordering, the custom playhead as
+    # seen by a hosted node, and the transport path's allocation guard.
+    transport_clock.cpp
+    # Phase 5.3a: the reusable headless MIDI render harness (absolute sample positions,
+    # byte-identical stream comparison, canonical golden byte stream, graph-internal
+    # tap) plus its own tests. This is the foundation of the Phase-6 golden-MIDI
+    # determinism suite — 6.4 builds on support/MidiRenderHarness.h, not on ad-hoc
+    # per-file render loops.
+    support/MidiRenderHarness.h
+    midi_render_harness.cpp
+    # Phase 5.3c/5.3e: the buffer-size-independence sweep (the Phase 5 headline
+    # criterion "test pattern plays in perfect time at any buffer size", and the
+    # regression guard for the two determinism snaps in SequencerProcessor) plus the
+    # sequencer / stop-flush matrix (§5.5 note-off ownership, the sounding-note table,
+    # the seeded churn fuzzer and the transport+sequencer allocation guard).
+    # support/NoteLifecycleCheck.h is the reusable note-balance checker Phase 8.3's
+    # hanging-note fuzzer reuses; support/SequencerRenderRig.h drives Transport +
+    # SequencerProcessor in the graph's own command-drain-then-beginBlock order.
+    support/NoteLifecycleCheck.h
+    support/SequencerRenderRig.h
+    transport_timing.cpp
+    sequencer_node.cpp
+    # Phase 5.3d: success criterion "hosted fake plugin observes correct BPM/PPQ via
+    # AudioPlayHead" on the WRAPPED path (HostedPluginNode → inner instance), including
+    # the regression guard for the wrapper's one-line setPlayHead forwarding.
+    transport_playhead.cpp
     hosting_synth_e2e.cpp
     hosting_swap_stress.cpp
     # Issue #19 in-process-scan crash-recovery stopgap: dead-man's-pedal blacklist,

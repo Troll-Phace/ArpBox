@@ -40,8 +40,26 @@ add_library(arpbox_engine STATIC
     graph/MidiInputControl.h
     graph/MidiInputProcessor.h
     graph/MidiInputProcessor.cpp
+    # Phase 5.1 transport (ARCHITECTURE §3.3, §4): the sample-accurate clock, the
+    # custom AudioPlayHead hosted plugins read, the command-fan-out interface, and
+    # the MIDI-only head node that drains commands + advances the clock.
+    graph/ICommandSink.h
+    graph/Transport.h
+    graph/Transport.cpp
+    graph/TransportPlayHead.h
+    graph/TransportPlayHead.cpp
+    graph/TransportProcessor.h
+    graph/TransportProcessor.cpp
     graph/EngineGraph.h
     graph/EngineGraph.cpp
+    # Phase 5.2 sequencer node shell + note lifecycle (ARCHITECTURE §4 step 4, §5.5).
+    # The sequencer node walks step boundaries off the transport's PPQ and emits a
+    # hardcoded scaffold pattern (Phase 6 replaces it with PatternSnapshot); the
+    # sounding-note table owns every note-off.
+    midi/SoundingNoteTable.h
+    midi/SoundingNoteTable.cpp
+    sequencer/SequencerProcessor.h
+    sequencer/SequencerProcessor.cpp
     EngineGuiGuard.h)
 
 target_compile_features(arpbox_engine PUBLIC cxx_std_20)

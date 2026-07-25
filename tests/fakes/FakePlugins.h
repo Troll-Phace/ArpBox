@@ -37,7 +37,8 @@ inline constexpr int kWrongLatencySamples = 512;
 // Corpus taxonomy
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** The hostile behaviors the corpus covers (docs/INSTRUCTIONS.md Phase 3.3). */
+/** The hostile behaviors the corpus covers (docs/INSTRUCTIONS.md Phase 3.3), plus
+    the instrumentation fakes that observe what the HOST did (see `auxiliaryCorpus`). */
 enum class FakeBehavior : std::uint8_t
 {
     baseline,          ///< Well-behaved instrument. The control case.
@@ -45,7 +46,8 @@ enum class FakeBehavior : std::uint8_t
     allocateInProcess, ///< Allocates on the heap inside processBlock (RT violation).
     wrongLatency,      ///< Reports a bogus latency it does not actually apply.
     stateCorrupting,   ///< getState/setState misbehave (unstable / non-restoring blob).
-    busLying           ///< Refuses every bus layout offered to it.
+    busLying,          ///< Refuses every bus layout offered to it.
+    playHeadObserving  ///< AUXILIARY (not scanned): records what the host's AudioPlayHead reported.
 };
 
 /** One corpus entry. `discoverable == false` marks the crash-on-scan offender:
@@ -75,7 +77,21 @@ const std::vector<FakeSpec>& canonicalCorpus ();
     the canonical corpus must add to the KnownPluginList. */
 int numDiscoverableInCorpus ();
 
-/** Looks up a spec by behavior (asserts it exists). */
+/** AUXILIARY fakes: instances that exist to OBSERVE host behavior rather than to be
+    hostile, and are therefore deliberately kept OUT of `canonicalCorpus()`.
+
+    Why the split (Phase 5.3): the canonical corpus IS the scan fixture —
+    `FakePluginFormat` enumerates it, and ~15 assertions across hosting_scan /
+    hosting_crash_recovery pin scan results to `numDiscoverableInCorpus()`. An
+    observing instrument adds nothing to any scan/fail-path assertion, so putting it
+    in the canonical list would only shift every one of those counts. Auxiliary
+    fakes are constructed directly (`makeFakeInstance (specFor (…))`) by the tests
+    that need them; `specFor` resolves canonical AND auxiliary specs, so callers see
+    one uniform lookup. */
+const std::vector<FakeSpec>& auxiliaryCorpus ();
+
+/** Looks up a spec by behavior in the canonical corpus, then the auxiliary one
+    (asserts it exists). */
 const FakeSpec& specFor (FakeBehavior behavior);
 
 /** Builds the PluginDescription a scan would produce for `spec`, stamped with
@@ -288,6 +304,142 @@ public:
     {
         return false; // Lie: nothing is ever acceptable.
     }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auxiliary (observing) fakes
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** What the host's `AudioPlayHead` reported for one block, as a hosted plugin saw
+    it. `hadPlayHead == false` means `getPlayHead()` returned null — the failure mode
+    when a wrapper forgets to forward the playhead to the instance it owns. */
+struct PlayHeadObservation
+{
+    std::int64_t blockIndex = 0;    ///< 0-based, counted by the fake itself.
+    bool hadPlayHead = false;       ///< getPlayHead() was non-null.
+    bool hadPosition = false;       ///< getPosition() returned a value.
+    double bpm = 0.0;               ///< Reported tempo (0 if absent).
+    double ppqPosition = -1.0;      ///< Reported PPQ (-1 if absent).
+    double ppqOfLastBarStart = -1.0;///< Reported bar-start PPQ (-1 if absent).
+    std::int64_t timeInSamples = -1;///< Reported timeline sample (-1 if absent).
+    bool isPlaying = false;         ///< Reported play state.
+};
+
+/** Instrument fake that records, every `processBlock`, what the host's
+    `AudioPlayHead` told it (ARCHITECTURE §3.3: "the custom AudioPlayHead exposes
+    tempo/PPQ/play-state to hosted plugins (synced LFOs and delays depend on it)";
+    INSTRUCTIONS Phase 5.3 criterion "hosted fake plugin observes correct BPM/PPQ via
+    AudioPlayHead").
+
+    This is the WRAPPED-path counterpart to tests/transport_clock.cpp's local
+    `PlayHeadProbe`, which sits in the graph as a bare node. A real synth is never a
+    bare node — it is an `AudioPluginInstance` INSIDE `HostedPluginNode`, and the
+    graph installs the playhead on the WRAPPER only. So this fake, wrapped, is what
+    proves the wrapper's `setPlayHead` forwarding (§6.3) actually works; without it,
+    every playhead assertion would only ever exercise a path no shipped plugin takes.
+
+    Otherwise behaves exactly like `baseline` (renders the held-note tone), so it can
+    stand in anywhere a baseline synth would.
+
+    ALLOCATION: the observation ring is reserved at construction and NEVER grown —
+    `processBlock` records up to capacity and counts the rest in
+    `droppedObservations()`. That keeps the fake usable inside an
+    `AllocationSentinel` region. */
+class PlayHeadObservingFake final : public FakePluginInstance
+{
+public:
+    /** Reserves room for `reserveBlocks` observations up front. */
+    explicit PlayHeadObservingFake (FakeSpec spec, std::size_t reserveBlocks = 4096)
+        : FakePluginInstance (spec)
+    {
+        observationLog.reserve (reserveBlocks);
+    }
+
+    // RT-SAFE: reads the playhead and records into pre-reserved storage.
+    void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) override
+    {
+        juce::ScopedNoDenormals noDenormals;
+
+        PlayHeadObservation observation;
+        observation.blockIndex = blockCounter++;
+
+        if (auto* head = getPlayHead ())
+        {
+            observation.hadPlayHead = true;
+
+            if (const auto position = head->getPosition ())
+            {
+                observation.hadPosition = true;
+                if (const auto value = position->getBpm ())
+                    observation.bpm = *value;
+                if (const auto value = position->getPpqPosition ())
+                    observation.ppqPosition = *value;
+                if (const auto value = position->getPpqPositionOfLastBarStart ())
+                    observation.ppqOfLastBarStart = *value;
+                if (const auto value = position->getTimeInSamples ())
+                    observation.timeInSamples = *value;
+                observation.isPlaying = position->getIsPlaying ();
+            }
+        }
+        else
+        {
+            ++nullPlayHeadCount;
+        }
+
+        if (! observation.hadPosition)
+            ++missingPositionCount;
+
+        if (observationLog.size () < observationLog.capacity ())
+            observationLog.push_back (observation);
+        else
+            ++droppedObservationCount;
+
+        latest = observation;
+
+        renderBaseline (buffer, midiMessages);
+    }
+
+    // ── Introspection for tests ───────────────────────────────────────────────
+
+    /** Every recorded block, in order (bounded by the reserved capacity). */
+    const std::vector<PlayHeadObservation>& observations () const noexcept { return observationLog; }
+
+    /** The most recent block's observation (recorded even past capacity). */
+    const PlayHeadObservation& lastObservation () const noexcept { return latest; }
+
+    /** Blocks rendered since construction / the last reset. */
+    std::int64_t blocksRendered () const noexcept { return blockCounter; }
+
+    /** Blocks in which `getPlayHead()` returned NULL. The wrapper-forwarding
+        regression signal: a wrapper that stops forwarding leaves this > 0. */
+    std::int64_t nullPlayHeadBlocks () const noexcept { return nullPlayHeadCount; }
+
+    /** Blocks in which no `PositionInfo` could be read (null playhead, or a playhead
+        returning nullopt). */
+    std::int64_t missingPositionBlocks () const noexcept { return missingPositionCount; }
+
+    /** Observations that did not fit the reserved capacity (assert 0 to trust the log). */
+    std::int64_t droppedObservations () const noexcept { return droppedObservationCount; }
+
+    /** Clears the log and counters and rewinds the block index. Call with rendering
+        stopped (after warmup blocks) so index 0 is the first block under test. */
+    void resetObservations () noexcept
+    {
+        observationLog.clear ();
+        latest = {};
+        blockCounter = 0;
+        nullPlayHeadCount = 0;
+        missingPositionCount = 0;
+        droppedObservationCount = 0;
+    }
+
+private:
+    std::vector<PlayHeadObservation> observationLog;
+    PlayHeadObservation latest;
+    std::int64_t blockCounter = 0;
+    std::int64_t nullPlayHeadCount = 0;
+    std::int64_t missingPositionCount = 0;
+    std::int64_t droppedObservationCount = 0;
 };
 
 /** Constructs the fake instance for a spec. Returns nullptr for a non-instantiable

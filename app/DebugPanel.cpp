@@ -91,6 +91,26 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
                  limiterButton.getToggleState () ? 1 : 0);
     };
 
+    // ── Transport (DEV-ONLY; the real header transport lands in Phase 15.3) ───
+    // Play/Stop and tempo are plain commands on the canonical queue; the readout
+    // comes from the snapshot's transport fields, which the master publishes every
+    // block. STOP also rewinds to PPQ 0 (see engine/graph/Transport.h).
+    addAndMakeVisible (playButton);
+    playButton.onClick = [this] { pushBare (engine::EngineCommandType::transportPlay); };
+
+    addAndMakeVisible (stopButton);
+    stopButton.onClick = [this] { pushBare (engine::EngineCommandType::transportStop); };
+
+    addAndMakeVisible (bpmLabel);
+    addAndMakeVisible (bpmSlider);
+    bpmSlider.setRange (engine::Transport::minBpm, engine::Transport::maxBpm, 0.01);
+    bpmSlider.setValue (engine::Transport::defaultBpm, dontSendNotification);
+    bpmSlider.setTextValueSuffix (" BPM");
+    bpmSlider.onValueChange = [this]
+    {
+        pushDouble (engine::EngineCommandType::setTempoBpm, bpmSlider.getValue ());
+    };
+
     // ── Simulate device loss (dev-only) ──────────────────────────────────────
     addAndMakeVisible (simulateLossButton);
     simulateLossButton.onClick = [this] { audioEngine.simulateDeviceLoss (); };
@@ -152,7 +172,7 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
 
     // ── Readout labels ───────────────────────────────────────────────────────
     for (auto* label :
-         { &deviceLabel, &statusBanner, &meterLabel, &voiceLabel, &blockLabel, &eventLabel, &pluginCountLabel, &scanStatusLabel })
+         { &deviceLabel, &statusBanner, &meterLabel, &transportLabel, &voiceLabel, &blockLabel, &eventLabel, &pluginCountLabel, &scanStatusLabel })
         addAndMakeVisible (*label);
 
     // Initial known-plugin count reflects the list restored at launch (Main.cpp
@@ -166,6 +186,7 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     statusBanner.setText (statusText (engine::deviceStatusOk), dontSendNotification);
     statusBanner.setColour (Label::backgroundColourId, Colours::darkgreen);
     meterLabel.setText ("peak L/R: - / -   rms L/R: - / -", dontSendNotification);
+    transportLabel.setText ("transport: STOPPED   ppq 0.000   120.00 BPM", dontSendNotification);
     voiceLabel.setText ("voices: 0", dontSendNotification);
     blockLabel.setText ("block: 0", dontSendNotification);
     eventLabel.setText ("events: 0  |  dropped cmds: 0", dontSendNotification);
@@ -176,6 +197,7 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     pushFloat (engine::EngineCommandType::setMasterGainDb, 0.0f);
     pushInt (engine::EngineCommandType::setLimiterEnabled, 1);
     pushInt (engine::EngineCommandType::setTestToneEnabled, 0);
+    pushDouble (engine::EngineCommandType::setTempoBpm, engine::Transport::defaultBpm);
 
     setSize (1280, 800);
 }
@@ -345,6 +367,7 @@ void DebugPanel::resized ()
     statusBanner.setBounds (row (32));
     deviceLabel.setBounds (row (24));
     meterLabel.setBounds (row (24));
+    transportLabel.setBounds (row (24));
     voiceLabel.setBounds (row (24));
     blockLabel.setBounds (row (24));
     eventLabel.setBounds (row (24));
@@ -367,6 +390,21 @@ void DebugPanel::resized ()
     }
 
     limiterButton.setBounds (row (28));
+
+    // ── Transport (DEV-ONLY) ─────────────────────────────────────────────────
+    area.removeFromTop (12);
+    {
+        auto r = row (32);
+        playButton.setBounds (r.removeFromLeft (120));
+        r.removeFromLeft (8);
+        stopButton.setBounds (r.removeFromLeft (120));
+    }
+    {
+        auto r = row (28);
+        bpmLabel.setBounds (r.removeFromLeft (90));
+        bpmSlider.setBounds (r);
+    }
+
     area.removeFromTop (12);
     simulateLossButton.setBounds (row (32).removeFromLeft (240));
 
@@ -416,6 +454,12 @@ void DebugPanel::refreshFromEngine ()
                             + "   rms L/R: " + linearToDbString (snapshot.rmsL)
                             + " / " + linearToDbString (snapshot.rmsR),
                         dontSendNotification);
+
+    // ── Transport (Phase 5.1 snapshot fields; the engine is the source of truth) ──
+    transportLabel.setText (String (snapshot.isPlaying ? "transport: PLAYING" : "transport: STOPPED")
+                                + "   ppq " + String (snapshot.ppqPosition, 3)
+                                + "   " + String (snapshot.bpm, 2) + " BPM",
+                            dontSendNotification);
 
     // ── Live MIDI-in voice count (interim; sequencer owns it in Phase 8) ─────
     voiceLabel.setText ("voices: " + String (snapshot.voiceCount), dontSendNotification);
@@ -560,6 +604,23 @@ void DebugPanel::pushInt (engine::EngineCommandType type, std::int32_t value)
     engine::EngineCommand command;
     command.type = type;
     command.value.i = value;
+    audioEngine.commands ().push (command);
+}
+
+// MESSAGE-THREAD ONLY.
+void DebugPanel::pushDouble (engine::EngineCommandType type, double value)
+{
+    engine::EngineCommand command;
+    command.type = type;
+    command.value.d = value;
+    audioEngine.commands ().push (command);
+}
+
+// MESSAGE-THREAD ONLY.
+void DebugPanel::pushBare (engine::EngineCommandType type)
+{
+    engine::EngineCommand command; // value stays default-initialised (unused)
+    command.type = type;
     audioEngine.commands ().push (command);
 }
 } // namespace arpbox::app

@@ -99,6 +99,15 @@ private:
     // MESSAGE-THREAD ONLY: pushes an int-payload command onto the queue.
     void pushInt (engine::EngineCommandType type, std::int32_t value);
 
+    // MESSAGE-THREAD ONLY: pushes a double-payload command onto the queue. Tempo and
+    // locate targets need full precision — they feed the transport's exact PPQ
+    // arithmetic (engine/graph/Transport.h), so a float round-trip is not acceptable.
+    void pushDouble (engine::EngineCommandType type, double value);
+
+    // MESSAGE-THREAD ONLY: pushes a command whose payload is unused (transport
+    // play/stop).
+    void pushBare (engine::EngineCommandType type);
+
     AudioEngine& audioEngine;              ///< Non-owning; owned by the application.
     hosting::PluginManager& pluginManager; ///< Non-owning; owned by the application.
     bool& scanForceKilledSink;             ///< App-owned; set true iff the scan worker was force-killed at teardown.
@@ -109,6 +118,12 @@ private:
     juce::Slider masterGainSlider;  ///< Master gain in dB.
     juce::ToggleButton limiterButton { "Safety Limiter" };
     juce::TextButton simulateLossButton { "Simulate Device Loss" };
+
+    // ── Transport (DEV-ONLY; the real header transport is Phase 15.3) ─────────
+    juce::TextButton playButton { "Play" };
+    juce::TextButton stopButton { "Stop" };
+    juce::Slider bpmSlider;                 ///< Tempo in BPM (20..300, §12.1 / Transport).
+    juce::Label bpmLabel { {}, "BPM" };
 
     // ── On-screen / QWERTY keyboard (note input → engine note FIFO) ──────────
     juce::MidiKeyboardState keyboardState;
@@ -126,6 +141,7 @@ private:
     juce::Label deviceLabel;      ///< Active device name / SR / buffer.
     juce::Label statusBanner;     ///< Device-status banner (OK / fell back / dead).
     juce::Label meterLabel;       ///< Peak / RMS in dB.
+    juce::Label transportLabel;   ///< PPQ / BPM / play state (snapshot transport fields).
     juce::Label voiceLabel;       ///< Live MIDI-in voice count (snapshot.voiceCount).
     juce::Label blockLabel;       ///< Block counter + STARVED indicator.
     juce::Label eventLabel;       ///< Last drained engine event + dropped-command count.

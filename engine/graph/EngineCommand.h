@@ -14,10 +14,13 @@ namespace arpbox::engine
     copies cheaply through the lock-free FIFO. One value per distinct action the
     message thread can ask the audio engine to perform.
 
-    Phase 2 ships only the master-section controls below. Transport commands
-    (play/stop/locate, set-tempo), pattern-switch queueing, seed re-roll, commit,
-    etc. are ADDED HERE in Phase 5+ as new enumerators — never as a second queue
-    type. Extend this enum; do not fork the channel. */
+    Pattern-switch queueing, seed re-roll, commit, etc. are ADDED HERE in later
+    phases as new enumerators — never as a second queue type. Extend this enum; do
+    not fork the channel.
+
+    APPEND-ONLY: enumerators are never renumbered or reordered. The numeric values
+    are not persisted today, but the producer/consumer pairing across the FIFO (and
+    Phase 11's project schema) treats them as stable identities. */
 enum class EngineCommandType : std::uint8_t
 {
     none = 0,             ///< No-op / default-initialised sentinel.
@@ -25,8 +28,13 @@ enum class EngineCommandType : std::uint8_t
     setLimiterEnabled,    ///< value.i = 0/1 (safety limiter default ON).
     setTestToneEnabled,   ///< value.i = 0/1 (debug passthrough test tone).
     setTestToneFrequency, ///< value.f = tone frequency in Hz.
-    // Phase 5+: transport (play/stop/locate/setTempo), pattern-switch queue,
-    // seed/DICE, commit/uncommit — appended as new enumerators above this line.
+    // ── Phase 5.1 transport (consumed by `Transport`, an ICommandSink) ────────
+    transportPlay,        ///< no payload — start the transport.
+    transportStop,        ///< no payload — stop AND rewind to PPQ 0 (§5.5 flush point).
+    transportLocate,      ///< value.d = target PPQ (must be finite and >= 0).
+    setTempoBpm,          ///< value.d = target tempo in BPM (clamped to 20..300).
+    // Later phases: pattern-switch queue, seed/DICE, commit/uncommit — appended as
+    // new enumerators above this line.
 };
 
 /** A single POD command posted by the UI (message thread) and drained by the
@@ -34,10 +42,20 @@ enum class EngineCommandType : std::uint8_t
 
     Trivially copyable by construction: an enum tag, an optional 16-bit target id
     (e.g. FX-slot index or parameter id for future targeted commands), and a
-    type-punned scalar payload. The `union` keeps the struct to 8 bytes while
-    letting each command type read the field it means. Interpret `value` strictly
-    according to `type`; the producer and consumer agree on which member is live
-    per `EngineCommandType`. */
+    type-punned scalar payload. Interpret `value` strictly according to `type`; the
+    producer and consumer agree on which member is live per `EngineCommandType`.
+
+    PAYLOAD WIDTH (Phase 5.1): the union carries a 64-bit member, so the struct is
+    16 bytes (8 payload + tag/target + padding) rather than 8. That is deliberate
+    and required, not convenience:
+      - `d` (double) — tempo and locate targets. BPM and PPQ are the inputs to the
+        transport's exact PPQ arithmetic (see Transport.h); rounding them through a
+        `float` on the way across the FIFO would inject error into the determinism
+        contract at the very first step.
+      - `u64` — Phase 12's xoshiro256++ seeds are 64-bit; a seed truncated to 32
+        bits is a different (and unreproducible) stream.
+    The queue is a fixed inline array of 1024 items, so the extra 8 bytes cost 8 KB
+    of static storage and nothing on the hot path. */
 struct EngineCommand
 {
     EngineCommandType type = EngineCommandType::none;
@@ -49,6 +67,8 @@ struct EngineCommand
         float f;
         std::int32_t i;
         std::uint32_t u;
+        double d;           ///< Tempo (BPM) / locate target (PPQ) — needs full precision.
+        std::uint64_t u64;  ///< 64-bit RNG seeds (Phase 12).
     } value {};
 };
 

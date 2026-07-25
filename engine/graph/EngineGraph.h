@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../EngineGuiGuard.h"
+#include "../sequencer/SequencerProcessor.h"
 #include "DeviceStatus.h"
 #include "EngineCommand.h"
 #include "EngineEvent.h"
@@ -10,6 +11,9 @@
 #include "MidiInputProcessor.h"
 #include "NoteEvent.h"
 #include "ToneControl.h"
+#include "Transport.h"
+#include "TransportPlayHead.h"
+#include "TransportProcessor.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors_headless/juce_audio_processors_headless.h>
@@ -32,15 +36,26 @@ namespace arpbox::engine
       the `EngineGraph`.
 
     TOPOLOGY (built once, on the message thread, in the constructor): the fixed
-    core is `MidiIn` and `TestTone → Master → audioOutput` (stereo pairs). The
+    core is `Transport → MidiIn → Seq` and `TestTone → Master → audioOutput` (stereo
+    pairs). The `Transport` node (a `TransportProcessor`) is the HEAD: it drains the
+    command queue and advances the transport clock before anything else renders. The
     `MidiIn` node (a `MidiInputProcessor`) merges QWERTY/pad events (the owned
-    `NoteEventQueue`) with hardware MIDI (the owned `MidiMessageCollector`) and is
-    left MIDI-unconnected until a synth is set. `setSynth()` inserts the synth on
-    the MESSAGE thread with `UpdateKind::async`, wiring `MidiIn → synth → Master`;
-    the debug `TestTone → Master` edge is kept (tone off by default) as a fallback
-    source. An `audioInput` and the graph's own `midiInput` IO node are added for
-    completeness and stay unconnected. Topology is NEVER edited from the audio
-    thread.
+    `NoteEventQueue`) with hardware MIDI (the owned `MidiMessageCollector`). The `Seq`
+    node (a `SequencerProcessor`, Phase 5.2) follows it, passing that live MIDI through
+    untouched and ADDING the generated arp events; it is left MIDI-unconnected
+    downstream until a synth is set. `setSynth()` inserts the synth on the MESSAGE
+    thread with `UpdateKind::async`, wiring `Seq → synth → Master` — the synth's MIDI
+    source is the SEQUENCER, not `MidiIn`, so the full chain is
+    `Transport → MidiIn → Seq → Synth → Master`. The debug `TestTone → Master` edge is
+    kept (tone off by default) as a fallback source. An `audioInput` and the graph's own
+    `midiInput` IO node are added for completeness and stay unconnected. Topology is
+    NEVER edited from the audio thread.
+
+    TRANSPORT & PLAYHEAD (Phase 5.1): this object owns the `Transport` clock and the
+    `TransportPlayHead` that wraps it, both declared BEFORE `graph` so they outlive
+    the nodes holding non-owning pointers to them. `buildGraph()` installs the
+    playhead on the graph ONCE (`graph.setPlayHead`), which JUCE then hands to every
+    node — including plugins inserted later — on every block.
 
     HOSTING: `getProcessor()` returns the underlying `AudioProcessorGraph` for
     `AudioProcessorPlayer::setProcessor`. The player prepares/processes the graph;
@@ -48,11 +63,11 @@ namespace arpbox::engine
     `prepareToPlay`/`releaseResources` passthroughs here exist for HEADLESS use
     (tests drive the graph without a device — see the notes at those methods).
 
-    COMMAND-DRAIN ARRANGEMENT (Phase 2, temporary): the single command queue is
-    drained by `MasterProcessor` at the head of its block (it is the sole SPSC
-    consumer). See MasterProcessor.h / ToneControl.h for how tone commands cross
-    from the master to the earlier-processed tone node. Phase 5 replaces this with
-    a dedicated transport head node. */
+    COMMAND-DRAIN ARRANGEMENT (Phase 5.1): the single command queue has exactly ONE
+    consumer — the `TransportProcessor` head node. It drains once per block and fans
+    each command out to the registered `ICommandSink`s (the `Transport` and the
+    `MasterProcessor`). See ICommandSink.h for the fan-out contract and ToneControl.h
+    for why the tone commands still cross to the tone node through an atomic shim. */
 class EngineGraph
 {
 public:
@@ -91,6 +106,34 @@ public:
     // prepareToPlay — callers must NOT reset it concurrently.
     /** Shared `juce::MidiMessageCollector` for hardware MIDI input. */
     juce::MidiMessageCollector& midiInputCollector () noexcept { return midiCollector; }
+
+    // ── Transport (Phase 5.1) ────────────────────────────────────────────────
+
+    // MESSAGE-THREAD ONLY (observation): the transport is AUDIO-THREAD-OWNED state.
+    // Its scalars are non-atomic by design (see Transport.h), so a message-thread
+    // read can tear against a concurrent `beginBlock`. This accessor exists for
+    // HEADLESS TESTS and engine-internal wiring, which drive the graph themselves;
+    // the UI must read transport state from `EngineSnapshot` instead (§10.1).
+    /** The transport clock. Not for UI consumption — use `snapshots()`. */
+    Transport& getTransport () noexcept { return transport; }
+
+    // MESSAGE-THREAD ONLY (observation).
+    /** The custom playhead installed on the graph; exposed for tests. */
+    juce::AudioPlayHead& getPlayHead () noexcept { return playHead; }
+
+    // ── Sequencer (Phase 5.2) ────────────────────────────────────────────────
+
+    // MESSAGE-THREAD ONLY (observation): like `getTransport()`, this reaches
+    // AUDIO-THREAD-OWNED state (the sounding-note table is non-atomic by design), so a
+    // read concurrent with a block can tear. It exists for HEADLESS TESTS, which drive
+    // the graph themselves and assert the §5.5 invariant that the table is empty after
+    // every flush point. The UI must read sequencer state from `EngineSnapshot` (§10.1).
+    /** The sequencer node. Not for UI consumption — use `snapshots()`. */
+    const SequencerProcessor& getSequencer () const noexcept
+    {
+        jassert (sequencerProcessor != nullptr); // set unconditionally by buildGraph()
+        return *sequencerProcessor;
+    }
 
     // ── Synth slot: type-agnostic graph topology API (§3.3, §6.3) ────────────
 
@@ -156,15 +199,26 @@ private:
     juce::MidiMessageCollector midiCollector; ///< Hardware MIDI; fed off the MIDI thread, drained by the MIDI-In node.
     MidiInputControl midiControl;         ///< MIDI-In channel mask / voice count / flush.
 
+    // Transport clock + the playhead wrapping it. Declared HERE (before `graph`) for
+    // the same lifetime reason as the channels above: the transport node, the master
+    // node, the SEQUENCER node and the graph's own playhead pointer all reference them
+    // non-owningly, and must never outlive them.
+    Transport transport;                       ///< Audio-thread-owned musical clock.
+    TransportPlayHead playHead { transport };  ///< Installed on the graph in buildGraph().
+
     // The root graph owns the processor nodes.
     juce::AudioProcessorGraph graph;
 
     // Non-owning handle into a graph-owned node (for setDeviceStatus forwarding).
     MasterProcessor* masterProcessor = nullptr;
     MidiInputProcessor* midiInputProcessor = nullptr; ///< Non-owning; graph-owned MIDI-In node.
+    TransportProcessor* transportProcessor = nullptr; ///< Non-owning; graph-owned head node.
+    SequencerProcessor* sequencerProcessor = nullptr; ///< Non-owning; graph-owned arp engine node.
 
     // Message-thread-only node identities retained for topology edits.
-    juce::AudioProcessorGraph::NodeID midiInputNodeId; ///< MIDI-In node (source of synth MIDI).
+    juce::AudioProcessorGraph::NodeID transportNodeId; ///< Transport head node (ordering root).
+    juce::AudioProcessorGraph::NodeID midiInputNodeId; ///< MIDI-In node (upstream of the sequencer).
+    juce::AudioProcessorGraph::NodeID sequencerNodeId; ///< Sequencer node (source of synth MIDI).
     juce::AudioProcessorGraph::NodeID masterNodeId;    ///< Master node (synth audio sink).
     juce::AudioProcessorGraph::NodeID synthNodeId;     ///< Current synth (invalid uid 0 when none).
 

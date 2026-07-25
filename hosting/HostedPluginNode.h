@@ -30,6 +30,10 @@ namespace arpbox::hosting
       - Unconditional output NaN/Inf scrub + denormal guard (mitigates issue #3: a
         NaN reaching the Master limiter). ALWAYS ON.
       - Latency forwarding: mirrors the inner's reported latency to the graph.
+      - AudioPlayHead forwarding: hands the graph's playhead DOWN to the inner so a
+        hosted plugin's tempo-synced LFOs/delays see tempo/PPQ/play-state (§3.3). The
+        graph sets the playhead on the WRAPPER only — it knows nothing about the
+        instance we own — so without this the inner's playhead would stay null forever.
 
     THREADING: setters below are MESSAGE-THREAD ONLY (they publish to atomics the
     audio thread reads). `processBlock` is RT-SAFE — no alloc/lock/log in this
@@ -107,6 +111,12 @@ public:
     // RT-SAFE: input trim (FX seam) → inner render → output trim → fade/bypass
     // ramp → NaN/Inf scrub. No alloc/lock in this wrapper's own code path.
     void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) override;
+
+    // RT-SAFE: the graph calls this on the AUDIO THREAD once per block per node, so
+    // it must stay exactly what the base does — a bare pointer assignment (no alloc,
+    // no lock, no log, no atomic). Forwards the same pointer to the inner instance
+    // (§3.3). See the .cpp for the playhead-lifetime invariant.
+    void setPlayHead (juce::AudioPlayHead* newPlayHead) override;
 
     double getTailLengthSeconds () const override;
     bool acceptsMidi () const override { return true; }

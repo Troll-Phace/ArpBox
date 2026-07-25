@@ -26,11 +26,8 @@ MasterProcessor::MasterProcessor ()
 }
 
 // MESSAGE-THREAD ONLY:
-void MasterProcessor::setSharedState (EngineCommandQueue* commands,
-                                      EngineSnapshotBuffer* snapshots,
-                                      ToneControl* tone) noexcept
+void MasterProcessor::setSharedState (EngineSnapshotBuffer* snapshots, ToneControl* tone) noexcept
 {
-    commandQueue = commands;
     snapshotBuffer = snapshots;
     toneControl = tone;
 }
@@ -86,8 +83,12 @@ void MasterProcessor::applyCommand (const EngineCommand& command) noexcept
             break;
 
         case EngineCommandType::none:
+        case EngineCommandType::transportPlay:
+        case EngineCommandType::transportStop:
+        case EngineCommandType::transportLocate:
+        case EngineCommandType::setTempoBpm:
         default:
-            break; // unknown/sentinel — ignore
+            break; // not ours (Transport owns the transport commands) — ignore
     }
 }
 
@@ -96,9 +97,11 @@ void MasterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 {
     juce::ScopedNoDenormals noDenormals;
 
-    // 1. Drain UI→engine commands (Phase-2 head-of-engine location; see header).
-    if (commandQueue != nullptr)
-        commandQueue->drain ([this] (const EngineCommand& c) noexcept { applyCommand (c); });
+    // NOTE (Phase 5.1): there is NO command drain here any more. `TransportProcessor`
+    // is the queue's single consumer and has already called this node's
+    // `applyCommand` for every command in this block, earlier in this same callback.
+    // Adding a second `drain()` here would split the SPSC stream between two
+    // consumers — each command would reach only one of them.
 
     // 1b. Graph-latency reporting. Poll the source (the root graph) and emit a
     //     latencyChanged event ONLY on a change. The audio thread is the sole
@@ -198,12 +201,21 @@ void MasterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         rms[1] = rms[0];
     }
 
-    // 6. Publish the snapshot. Build a fresh, fully-defined snapshot (transport /
-    //    generative fields stay zero until Phase 5) so no stale slot data leaks.
+    // 6. Publish the snapshot. Build a fresh, fully-defined snapshot so no stale
+    //    slot data leaks. Transport fields (Phase 5.1) come from the injected
+    //    Transport's LATCHED block-start values — the master renders after the
+    //    transport head node, so these describe THIS block. The generative fields
+    //    (seed) stay zero until Phase 12.
     ++blockCounter;
     if (snapshotBuffer != nullptr)
     {
         EngineSnapshot snap;
+        if (transportSource != nullptr)
+        {
+            snap.ppqPosition = transportSource->blockStartPpq ();
+            snap.bpm = transportSource->bpm ();
+            snap.isPlaying = transportSource->isPlaying ();
+        }
         snap.peakL = peak[0];
         snap.peakR = peak[1];
         snap.rmsL = rms[0];
