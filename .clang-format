@@ -26,14 +26,23 @@ AllowShortLambdasOnASingleLine: All
 # Signature spacing.
 PointerAlignment: Left
 ReferenceAlignment: Left
+# PointerAlignment must not be inferred per-file: `Type* p` is the house rule
+# even in a file that happens to lean the other way today.
+DerivePointerAlignment: false
 SpaceBeforeParens: Always
+# JUCE writes `if (! ok)`, never `if (!ok)`. LLVM's default strips that space and
+# would rewrite every negation in the tree.
+SpaceAfterLogicalNot: true
 SpaceAfterCStyleCast: false
 SpacesInParens: Never
 SpaceBeforeAssignmentOperators: true
 SpacesBeforeTrailingComments: 1
 
 # Namespaces / templates.
-NamespaceIndentation: None
+# `Inner` indents nested namespaces and — the reason it is set — the bodies of
+# anonymous `namespace { ... }` helper blocks, which this codebase writes indented.
+# `None` would dedent every file-local helper in engine/ and tests/.
+NamespaceIndentation: Inner
 FixNamespaceComments: true
 CompactNamespaces: false
 AlwaysBreakTemplateDeclarations: Yes
@@ -46,15 +55,44 @@ BreakConstructorInitializers: BeforeComma
 ConstructorInitializerIndentWidth: 4
 PackConstructorInitializers: Never
 
-# Includes: grouping/order is maintained by hand per code-style.md, so do not
-# let clang-format re-sort across our category boundaries.
+# Includes: grouping/order is maintained by hand per code-style.md (matching
+# header, project headers, JUCE modules, stdlib). Sorting stays OFF for two
+# reasons: (1) reordering #includes is a semantic change, not a formatting one —
+# it can change what compiles; (2) clang-format's default IncludeCategories put
+# `<juce_*/...>` and `<atomic>` in the SAME category, so within one contiguous
+# block it sorts stdlib ABOVE JUCE and actively violates the documented order.
+# Verified: enabling sorting rewrites the house order
+#   "Demo.h" / "engine/graph/EngineGraph.h" / <juce_core/...> / <atomic>
+# into ... <atomic> / <cstdint> / <juce_core/...>. So it is disabled, not tuned.
 SortIncludes: false
+# Blank-line-separated include groups are what keeps the four categories apart;
+# never let clang-format merge or regroup them.
+IncludeBlocks: Preserve
+# Same class of hazard as SortIncludes: do not reorder using-declarations.
+SortUsingDeclarations: Never
+
+# clang-format may only ever change WHITESPACE in this project. These are the
+# switches that let it edit CODE; they are pinned off explicitly rather than left
+# to LLVM's defaults, because the CI format gate is blocking and LLVM has changed
+# formatting defaults across releases (ReflowComments did so in LLVM 21). A
+# toolchain bump must never silently promote the gate into a code rewriter.
+InsertBraces: false
+RemoveBracesLLVM: false
+RemoveSemicolon: false
+RemoveParentheses: Leave
 
 # Misc.
 AlignAfterOpenBracket: Align
 AlignTrailingComments: true
-BinPackArguments: true
-BinPackParameters: true
+# One-per-line wrapping (JUCE house style): when a call or signature does not fit
+# in 120 columns, every argument/parameter gets its own line instead of being
+# bin-packed into a filled paragraph. The four settings work as a set — the
+# BinPack* pair forbids packing, and the AllowAll* pair forbids the escape hatch
+# of dumping the whole list onto one continuation line.
+BinPackArguments: false
+BinPackParameters: false
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
 KeepEmptyLinesAtTheStartOfBlocks: false
 MaxEmptyLinesToKeep: 1
 Cpp11BracedListStyle: false
