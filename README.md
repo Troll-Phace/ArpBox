@@ -52,14 +52,77 @@ ctest --test-dir build -L determinism
 Available labels: `determinism`, `midi-conformance`, `hosting-lab`,
 `perf-budget`, `unit`.
 
-### Sanitizer builds
+### Build variants (CMake presets)
 
-ASan and TSan configurations are provided as CMake presets (see
-`CMakePresets.json`). Use them to build the sanitized targets, e.g.:
+`CMakePresets.json` defines the shipping build plus four developer-loop
+variants, each in its own build directory so they never clobber `build/`:
+
+| Preset | Build dir | Purpose |
+|---|---|---|
+| `default` | `build/` | Universal (arm64 + x86_64) RelWithDebInfo — the **shipping** artefact and the standard test run |
+| `asan` | `build-asan/` | AddressSanitizer: use-after-free / out-of-bounds / heap-overflow |
+| `tsan` | `build-tsan/` | ThreadSanitizer: the FIFO / snapshot cross-thread machinery |
+| `tidy` | `build-tidy/` | clang-tidy compile database (configure only — never built) |
+| `debug` | `build-debug/` | Debug: live `jassert`s and JUCE's leak detector |
 
 ```
-cmake --preset asan
-cmake --preset tsan
+cmake --preset asan  && cmake --build --preset asan  && ctest --preset asan
+cmake --preset tsan  && cmake --build --preset tsan  && ctest --preset tsan
+cmake --preset debug && cmake --build --preset debug && ctest --preset debug
+```
+
+#### The four variants are single-arch (arm64) by design
+
+`asan`, `tsan`, `tidy` and `debug` all inherit a hidden `single-arch-base`
+preset that pins `CMAKE_OSX_ARCHITECTURES=arm64`. This is a deliberate,
+permanent stance, not an oversight:
+
+- Sanitizer runtimes are **per-arch** and do not link into a universal binary,
+  so ASan/TSan builds cannot be universal at all.
+- clang-tidy rejects a compile database whose entries carry two `-arch` flags
+  (`error: expected exactly one compiler job`), so the tidy database cannot be
+  universal either.
+- These are developer-loop tools, run on arm64 dev machines and arm64 CI
+  runners. The **shipping** artefact is always universal — built by `default`
+  and verified slice-by-slice (`lipo -archs`) in CI's build-and-test job.
+
+Accepted consequences: there is no ASan/TSan/clang-tidy coverage of
+x86_64-specific code paths, and on an Intel host these four presets cross-compile
+at best — nothing they produce runs natively, so the sanitizer and Debug trees
+are unusable there. If Intel coverage is ever needed, add sibling presets
+(`asan-x86_64`, …)
+rather than deriving the architecture from the host — an implicit host arch
+would silently change which slice CI sanitizes. Revisit at Phase 21
+(Performance & RT-Safety Validation) at the latest.
+
+#### Leak detection is NOT ASan's job on macOS
+
+LeakSanitizer **does not exist on Darwin**: `ASAN_OPTIONS=detect_leaks=1` is
+rejected and aborts Catch2's test-discovery step. The `asan` preset finds memory
+*errors*, never leaks. Use instead, in this order:
+
+```
+# 1. Enforcing gate — non-zero exit if anything leaked (works in any config):
+leaks --atExit -- ./build/tests/arpbox_tests "<test name or tag>"
+
+# 2. Attribution — names the leaking class, but only PRINTS unless a debugger
+#    is attached, and is compiled out entirely in RelWithDebInfo:
+ctest --preset debug        # JUCE LeakedObjectDetector, needs the Debug build
+```
+
+Instruments' Leaks instrument covers the manual and soak passes. See
+`docs/INSTRUCTIONS.md` Phase 10 and Phase 21.3.
+
+### Linting
+
+`clang-tidy` and `clang-format` are not on `PATH` on a stock macOS box (the
+Xcode toolchain does not ship them — `brew install llvm`). One script drives
+linting for both developers and CI:
+
+```
+bash .claude/skills/run-lint/lint.sh tidy      # clang-tidy via the `tidy` preset
+bash .claude/skills/run-lint/lint.sh format    # clang-format --dry-run (check only)
+bash .claude/skills/run-lint/lint.sh tools     # show resolved tool paths
 ```
 
 ## Project layout

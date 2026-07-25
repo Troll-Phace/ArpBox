@@ -66,6 +66,15 @@ void Transport::locateToPpq (double targetPpq) noexcept
     // Derive the integer sample position from the musical target, then anchor the
     // segment exactly there so ppqAtSample(samplePosition) == targetPpq with no
     // residual error.
+    //
+    // KNOWN SEAM (issue #40) — single-segment PPQ→sample mapping. The division below
+    // scales the target PPQ by the CURRENT tempo, i.e. as though that tempo had held
+    // since PPQ 0. PPQ is exact either way (the anchor pair below pins it), and the
+    // determinism contract (§1.2) rides on PPQ only — but after a session containing
+    // tempo changes, the `timeInSamples`/`timeInSeconds` fields reported to hosted
+    // plugins across a locate are a single-segment APPROXIMATION. Acceptable for the
+    // MVP (§8.1's `transport` carries one `bpm`). When the post-MVP tempo map lands,
+    // this must walk the segment list instead of assuming one segment.
     samplePosition = ppqPerSampleValue > 0.0
                          ? static_cast<std::int64_t> (std::llround (targetPpq / ppqPerSampleValue))
                          : 0;

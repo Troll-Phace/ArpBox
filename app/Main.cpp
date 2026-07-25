@@ -76,8 +76,21 @@ public:
         // corrupt state. A cleanly-finished scan already saved on completion, so no
         // data is lost by skipping. Normal (never-scanned / clean-scan) shutdowns
         // still save.
+        //
+        // save() logs its own failure durably (issue #17). There is no UI left to
+        // surface it to here — the window is already gone — so we only add the shutdown
+        // consequence, and NEVER throw or block: a failed persist must not wedge
+        // shutdown. writeTo() is atomic, so a previously-saved list survives intact.
         if (pluginManager != nullptr && ! scanWorkerForceKilled)
-            pluginManager->save ();
+        {
+            const auto saved = pluginManager->save ();
+
+            if (! saved.wasOk ())
+            {
+                juce::Logger::writeToLog ("ARPBOX: shutdown was the last chance to persist the "
+                                          "plugin list — this session's scan results are lost.");
+            }
+        }
 
         // PluginManager BEFORE its borrowed format manager (a value member destroyed
         // after this scope), then the engine LAST.

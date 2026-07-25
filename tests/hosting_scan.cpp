@@ -156,7 +156,7 @@ TEST_CASE ("hosting/persistence: saved list restores in a fresh manager", "[host
             savedNames.add (type.name);
 
         REQUIRE (savedNames.size () == numDiscoverableInCorpus ());
-        manager.save ();
+        REQUIRE (manager.save ().wasOk ());
         REQUIRE (manager.getPluginListFile ().existsAsFile ());
     }
 

@@ -76,12 +76,46 @@ target_compile_features(arpbox_engine PUBLIC cxx_std_20)
 # `engine/...` include convention keeps working, but nothing outside engine/ is
 # reachable through this target. Internal engine TUs use relative includes
 # (e.g. "../EngineGuiGuard.h"), so no in-tree bare-prefix export is needed.
+#
+# Robustness (issue #7): a plain `if(NOT EXISTS)` guard is not enough, because EXISTS
+# FOLLOWS the link and so answers a question about the TARGET, not the link.
+#   - DANGLING link (source tree moved; build dir reused across a rename): EXISTS is
+#     false while the link still occupies the path. Measured on CMake 4.0.1/macOS,
+#     CREATE_LINK happens to replace the existing link rather than erroring, so this
+#     case self-heals today — but that is not a documented contract, so do not lean on it.
+#   - STALE link that RESOLVES (points at a different checkout): EXISTS is true, the
+#     guard skips, and the target silently exports the WRONG headers. This one does not
+#     self-heal on any CMake version and is the real defect.
+# So: read the current target and recreate on any mismatch. IS_SYMLINK is tested BEFORE
+# EXISTS/IS_DIRECTORY because those follow links; a stale link is unlinked with
+# file(REMOVE), which never recurses into the target tree (verified).
 set(_engine_include_root "${CMAKE_CURRENT_BINARY_DIR}/include")
+set(_engine_include_link "${_engine_include_root}/engine")
 file(MAKE_DIRECTORY "${_engine_include_root}")
-if(NOT EXISTS "${_engine_include_root}/engine")
+
+set(_engine_link_valid FALSE)
+if(IS_SYMLINK "${_engine_include_link}")
+    file(READ_SYMLINK "${_engine_include_link}" _engine_link_target)
+    if(_engine_link_target STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
+        set(_engine_link_valid TRUE)
+    else()
+        file(REMOVE "${_engine_include_link}")
+    endif()
+elseif(EXISTS "${_engine_include_link}")
+    # Not a link: a stale copy from a copy-fallback build (see the Windows note).
+    file(REMOVE_RECURSE "${_engine_include_link}")
+endif()
+
+if(NOT _engine_link_valid)
+    # WINDOWS PORT (post-MVP, §2.2): CREATE_LINK ... SYMBOLIC needs
+    # SeCreateSymbolicLinkPrivilege on Windows (Developer Mode or elevation), so it
+    # will fail for ordinary users. Add COPY_ON_ERROR there to fall back to a real
+    # directory copy — noting that a copy is a configure-time SNAPSHOT of the headers,
+    # so edits would not propagate until the next configure; a directory junction
+    # (`cmd /c mklink /J`, no privilege required) is the better Windows answer.
     file(CREATE_LINK
         "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${_engine_include_root}/engine"
+        "${_engine_include_link}"
         SYMBOLIC)
 endif()
 

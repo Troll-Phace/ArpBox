@@ -17,14 +17,22 @@
       }
     },
     {
-      "name": "asan",
-      "displayName": "AddressSanitizer",
-      "description": "RelWithDebInfo + AddressSanitizer. Single-arch (arm64): sanitizer runtimes are per-arch and do not link into a universal binary, so ASan/TSan builds pin CMAKE_OSX_ARCHITECTURES to the host arch. Used by the CI ASan job (task 1.3) and RT-safety phases. OBJC/OBJCXX flags mirror C/CXX so JUCE's Objective-C++ .mm unity TUs are instrumented too (see the tsan preset note).",
+      "name": "single-arch-base",
+      "hidden": true,
+      "description": "Shared base for every SINGLE-ARCH developer-loop build variant (asan, tsan, tidy, debug). CMAKE_OSX_ARCHITECTURES is pinned to arm64 — not host-derived, not parameterized — and that is a DELIBERATE, DOCUMENTED STANCE (issue #2), not an oversight: (1) sanitizer runtimes are per-arch and do not link into a universal binary, so ASan/TSan cannot be universal at all; (2) clang-tidy rejects a compile database whose entries carry two -arch flags ('expected exactly one compiler job'), so the tidy DB cannot be universal either; (3) these are developer-loop tools run on arm64 dev machines and arm64 CI runners, while the SHIPPING artefact is always built universal by the `default` preset and CI's build-and-test job. Consequence, accepted: no ASan/TSan/tidy coverage of x86_64-specific code paths, and on an Intel host these presets cross-compile at best — nothing they produce runs natively. If Intel coverage is ever needed, add sibling presets (e.g. asan-x86_64) rather than making the arch dynamic — an implicit host-derived arch would silently change which slice CI sanitizes. Revisit at Phase 21 (Performance & RT-Safety Validation) at the latest.",
       "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "asan",
+      "inherits": "single-arch-base",
+      "displayName": "AddressSanitizer",
+      "description": "RelWithDebInfo + AddressSanitizer, single-arch (see single-arch-base for the arm64 rationale). Used by the RT-safety phases. OBJC/OBJCXX flags mirror C/CXX so JUCE's Objective-C++ .mm unity TUs are instrumented too (see the tsan preset note). NOTE: ASan on macOS does NOT detect leaks — LeakSanitizer is unsupported on Darwin and ASAN_OPTIONS=detect_leaks=1 is rejected (it also aborts Catch2's test-discovery step). This preset gives use-after-free / out-of-bounds / heap-overflow only; for leak detection use the `debug` preset's JUCE LeakedObjectDetector (issue #32).",
       "binaryDir": "${sourceDir}/build-asan",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_OSX_ARCHITECTURES": "arm64",
         "CMAKE_C_FLAGS": "-fsanitize=address -fno-omit-frame-pointer",
         "CMAKE_CXX_FLAGS": "-fsanitize=address -fno-omit-frame-pointer",
         "CMAKE_OBJC_FLAGS": "-fsanitize=address -fno-omit-frame-pointer",
@@ -35,19 +43,40 @@
     },
     {
       "name": "tsan",
+      "inherits": "single-arch-base",
       "displayName": "ThreadSanitizer",
-      "description": "RelWithDebInfo + ThreadSanitizer. Single-arch (arm64) for the same reason as ASan. Used by the CI TSan job (task 1.3) and to audit the FIFO/snapshot cross-thread machinery. OBJC/OBJCXX flags MUST mirror C/CXX: on macOS JUCE modules (juce_core, which owns juce::AbstractFifo, and the audio modules) compile as Objective-C++ .mm unity TUs, so without CMAKE_OBJCXX_FLAGS those TUs build UNINSTRUMENTED and TSan goes blind to the atomics inside them — producing false-positive payload races on every AbstractFifo-backed channel (SpscFifo/command/event/retirement).",
-      "generator": "Ninja",
+      "description": "RelWithDebInfo + ThreadSanitizer, single-arch (see single-arch-base for the arm64 rationale). Used to audit the FIFO/snapshot cross-thread machinery. OBJC/OBJCXX flags MUST mirror C/CXX: on macOS JUCE modules (juce_core, which owns juce::AbstractFifo, and the audio modules) compile as Objective-C++ .mm unity TUs, so without CMAKE_OBJCXX_FLAGS those TUs build UNINSTRUMENTED and TSan goes blind to the atomics inside them — producing false-positive payload races on every AbstractFifo-backed channel (SpscFifo/command/event/retirement).",
       "binaryDir": "${sourceDir}/build-tsan",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_OSX_ARCHITECTURES": "arm64",
         "CMAKE_C_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_OBJC_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_OBJCXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
         "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread"
+      }
+    },
+    {
+      "name": "tidy",
+      "inherits": "single-arch-base",
+      "displayName": "clang-tidy compile database",
+      "description": "Configure-only build tree whose sole product is a clang-tidy-consumable compile_commands.json (issue #31). Two things make it work where the universal `default` tree does not: (1) single-arch via single-arch-base — the universal tree emits two -arch flags per entry and clang-tidy fails with 'expected exactly one compiler job'; (2) CMAKE_OSX_SYSROOT=macosx, which forces CMake to bake an explicit -isysroot into every compile-database entry. Without it, Homebrew clang-tidy uses its own default header search and dies on '<TargetConditionals.h> file not found' inside juce_TargetPlatform.h — which is why an --extra-arg=-isysroot had to be hand-written before. With this preset no manual flag surgery is needed: `cmake --preset tidy && run-clang-tidy -p build-tidy` just works. This tree does NOT need to be built; configuring it is enough (juceaide runs at configure time and generates the JUCE headers clang-tidy needs). Used by BOTH the /run-lint skill and CI's lint job, via .claude/skills/run-lint/lint.sh.",
+      "binaryDir": "${sourceDir}/build-tidy",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_OSX_SYSROOT": "macosx"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": "single-arch-base",
+      "displayName": "Debug (live jasserts + JUCE leak detector)",
+      "description": "Debug, single-arch (see single-arch-base). This is the LEAK-DETECTION build (issue #32). CMAKE_BUILD_TYPE=Debug is load-bearing, not a convenience: JUCE defines JUCE_CHECK_MEMORY_LEAKS only when JUCE_DEBUG is set (juce_core.h), and jassertfalse is a no-op under NDEBUG — so in RelWithDebInfo (the default/asan/tsan presets) every JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR / JUCE_LEAK_DETECTOR in the codebase compiles to NOTHING and leaks pass silently. Run leak-sensitive suites (e.g. Phase 10's editor open/close storm) here: a leaked JUCE-derived object trips the detector at shutdown and fails the test binary. ASan does NOT substitute — LeakSanitizer is unsupported on Darwin.",
+      "binaryDir": "${sourceDir}/build-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     }
   ],
@@ -63,6 +92,10 @@
     {
       "name": "tsan",
       "configurePreset": "tsan"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug"
     }
   ],
   "testPresets": [
@@ -83,6 +116,13 @@
     {
       "name": "tsan",
       "configurePreset": "tsan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug",
       "output": {
         "outputOnFailure": true
       }

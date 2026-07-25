@@ -114,8 +114,28 @@ public:
     // ── Persistence (MESSAGE-THREAD ONLY) ────────────────────────────────────
 
     /** Writes the known-plugin list to `plugin-list.xml`. Mirrors
-        `AudioEngine::saveDeviceState` (createXml → writeTo). */
-    void save () const;
+        `AudioEngine::saveDeviceState` (createXml → writeTo).
+
+        `XmlElement::writeTo` is CRASH-safe but not FAILURE-free: it streams into a
+        `TemporaryFile`, fsyncs, then atomically renames over the destination, so a
+        failed or interrupted write can never truncate an already-good
+        `plugin-list.xml`. It CAN still fail outright (read-only volume, disk full,
+        permissions), and a dropped failure silently discards a whole scan's worth of
+        work — the user just rescans on the next launch with no signal. So the outcome
+        is RETURNED, not swallowed (issue #17), and `[[nodiscard]]` keeps it from being
+        ignored again.
+
+        A failure is ALSO logged here, via `juce::Logger::writeToLog`. That is the
+        durable half of the fix and lives in this class on purpose: it cannot be
+        forgotten by a future caller, and it outlives the temporary `DebugPanel`. Note
+        `DBG` is NOT usable for this — it expands to nothing under `NDEBUG`, i.e. it is
+        silent in precisely the RelWithDebInfo/Release builds we ship. Callers add only
+        what they alone can: user-visible surfacing (a status line today, a banner from
+        Phase 15).
+
+        @returns ok on a successful write; a failure carrying the destination path
+                 otherwise. MESSAGE-THREAD ONLY. */
+    [[nodiscard]] juce::Result save () const;
 
     /** Restores the known-plugin list from `plugin-list.xml` (if present) and
         re-applies dead-man's-pedal blacklistings from `plugin-deadmanspedal`.

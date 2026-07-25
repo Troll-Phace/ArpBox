@@ -241,8 +241,23 @@ void DebugPanel::startPluginScan ()
     if (scanThread.isThreadRunning ())
         return; // a scan is already in flight
 
-    scanRunning.store (true, std::memory_order_relaxed);
+    // Release-store, pairing with the vblank's acquire-load in refreshFromEngine().
+    // This DIRECTION publishes nothing worker-written (the message thread both writes
+    // and reads `true`), but the flag carries one ordering discipline at every site so
+    // the pairing is legible where it matters — the worker's release-store of `false`
+    // (issue #15).
+    scanRunning.store (true, std::memory_order_release);
     scanProgress.store (0.0f, std::memory_order_relaxed);
+
+    // Defensive clear (issue #15): a stale `true` would make the vblank run the
+    // completion block — save + re-enable the scan button — WHILE this pass is in
+    // flight. It cannot happen today, because scanButton is only ever re-enabled
+    // inside that completion block, so reaching this line proves the previous flag was
+    // consumed. Belt-and-braces rather than resting on that implicit invariant. Note
+    // it is safe even if the invariant broke: a discarded save loses nothing durable,
+    // since the list only grows within a session and this pass always ends with
+    // another save (runPluginScan sets the flag even on cancel).
+    scanJustFinished.store (false, std::memory_order_relaxed);
     {
         const ScopedLock sl (scanNameLock);
         currentScanName.clear ();
@@ -255,6 +270,7 @@ void DebugPanel::startPluginScan ()
     // (no worker is running yet: we start the thread below).
     lastSavedTypeCount = pluginManager.getKnownPluginList ().getNumTypes ();
     lastSaveTimeMs = Time::getMillisecondCounter ();
+    lastPersistFailed = false; // fresh pass — do not carry a previous pass's marker.
 
     scanButton.setEnabled (false);
     cancelScanButton.setEnabled (true);
@@ -280,12 +296,25 @@ void DebugPanel::runPluginScan ()
     // (rescanExisting = false) so a relaunch + rescan skips known files.
     const auto result = pluginManager.scanAll (/*rescanExisting*/ false, onProgress, shouldCancel);
 
+    // Plain relaxed stores: they are read only AFTER an acquire on one of the two
+    // flags below, and both flags are release-stored after these lines, so the
+    // acquiring reader is guaranteed to see them.
     lastScannedTypeCount.store (result.numTypesInList, std::memory_order_relaxed);
     lastScanFailedCount.store (result.failedFiles.size (), std::memory_order_relaxed);
-    scanRunning.store (false, std::memory_order_relaxed);
+
+    // Release-store: publishes EVERYTHING this worker wrote — every KnownPluginList
+    // mutation made inside scanAll() plus the two counters above — to any thread that
+    // observes `false` through an acquire-load. The vblank's "no worker running ⇒ safe
+    // to read the live type count AND the unlocked blacklist" branch rests on exactly
+    // that happens-before edge; relaxed gave it none, so the comment there claimed a
+    // guarantee the code did not provide (issue #15). Sequenced BEFORE the
+    // scanJustFinished store below, so a reader that acquires "finished" can never
+    // still observe "running".
+    scanRunning.store (false, std::memory_order_release);
 
     // Release-store: publishes the completed list to the message thread, which then
-    // persists it (save() is message-thread only) on the next vblank.
+    // persists it (save() is message-thread only) on the next vblank. Paired with the
+    // acquire-exchange in refreshFromEngine().
     scanJustFinished.store (true, std::memory_order_release);
 }
 
@@ -502,17 +531,26 @@ void DebugPanel::refreshFromEngine ()
     // no longer being mutated. save() is message-thread only.
     if (scanJustFinished.exchange (false, std::memory_order_acquire))
     {
-        pluginManager.save ();
+        // save() logs its own failure (issue #17); the panel's job is to make it
+        // VISIBLE, since a user whose list silently fails to persist just loses the
+        // scan. No DBG here — it compiles out under NDEBUG.
+        const auto saved = pluginManager.save ();
+        lastPersistFailed = ! saved.wasOk ();
+
         refreshSynthList (); // newly-scanned instruments can now be loaded.
         scanButton.setEnabled (true);
         cancelScanButton.setEnabled (false);
         scanStatusLabel.setText ("scan complete: " + String (lastScannedTypeCount.load (std::memory_order_relaxed))
                                      + " types, " + String (lastScanFailedCount.load (std::memory_order_relaxed))
-                                     + " failed",
+                                     + " failed"
+                                     + (lastPersistFailed ? String ("   [SAVE FAILED — see log]") : String ()),
                                  dontSendNotification);
     }
 
-    if (scanRunning.load (std::memory_order_relaxed))
+    // Acquire-load, pairing with the worker's release-store of `false` in
+    // runPluginScan: whichever branch we take below, we have a real happens-before on
+    // everything the worker wrote (issue #15).
+    if (scanRunning.load (std::memory_order_acquire))
     {
         // ── Incremental progress persistence (issue #19 stopgap) ─────────────
         // Reading the type count WHILE the worker scans is safe: getNumTypes()
@@ -544,9 +582,19 @@ void DebugPanel::refreshFromEngine ()
         if (liveCount - lastSavedTypeCount >= kScanSaveTypeGrowth
             && nowMs - lastSaveTimeMs >= kScanSaveMinIntervalMs)
         {
-            pluginManager.save ();
-            lastSavedTypeCount = liveCount;
+            // save() logs the failure itself (issue #17); here we only react to it.
+            const auto saved = pluginManager.save ();
+            lastPersistFailed = ! saved.wasOk ();
+
+            // ALWAYS advance the time floor, so a persistently failing write retries at
+            // most once per kScanSaveMinIntervalMs instead of hammering the disk every
+            // vblank. Advance the banked count ONLY on success: a failed save has
+            // banked nothing, so leaving lastSavedTypeCount behind keeps the growth
+            // gate satisfied and the next interval retries.
             lastSaveTimeMs = nowMs;
+
+            if (saved.wasOk ())
+                lastSavedTypeCount = liveCount;
         }
 
         // Show progress + the current file, plus the live (accumulating) count so
@@ -558,18 +606,24 @@ void DebugPanel::refreshFromEngine ()
         }
         scanStatusLabel.setText ("scanning "
                                      + String (roundToInt (scanProgress.load (std::memory_order_relaxed) * 100.0f))
-                                     + "%   " + name,
+                                     + "%   " + name
+                                     + (lastPersistFailed ? String ("   [SAVE FAILED — see log]") : String ()),
                                  dontSendNotification);
         pluginCountLabel.setText ("known plugins: " + String (liveCount) + " (scanning…)",
                                   dontSendNotification);
     }
     else
     {
-        // No worker running => safe to read the live count AND the blacklist. Show
+        // No worker running => safe to read the live count AND the blacklist. That
+        // now holds for a real reason: the acquire-load above synchronises-with the
+        // worker's release-store of scanRunning == false, so every list mutation the
+        // worker made happens-before this read and the worker is provably done
+        // mutating. (getNumTypes() would be internally locked either way; the
+        // blacklist read is NOT locked, so it is this edge — not the lock — that makes
+        // reading getBlacklistedFiles() here safe. Only ever read it off-scan.) Show
         // the quarantined count next to the type count so the user can see what the
         // dead-man's-pedal blacklisted after a crash-recovery relaunch, and that
-        // progress is accumulating (issue #19 stopgap). getBlacklistedFiles()
-        // returns a raw, unlocked reference, so only read it off-scan like this.
+        // progress is accumulating (issue #19 stopgap).
         const auto& list = pluginManager.getKnownPluginList ();
         pluginCountLabel.setText ("known plugins: " + String (list.getNumTypes ())
                                       + "   quarantined: " + String (list.getBlacklistedFiles ().size ()),
