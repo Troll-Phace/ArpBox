@@ -72,6 +72,21 @@ jobs:
         # hosting-lab | perf-budget, all registered with CTest.
         run: ctest --test-dir build --output-on-failure
 
+      - name: Determinism gate (ARCHITECTURE §1.2)
+        # §1.2 calls the determinism suite a RELEASE GATE: "same (pattern, seeds,
+        # N bars) => byte-identical MIDI, forever". The step above already runs it
+        # as part of the full suite, so this is redundant in COVERAGE but not in
+        # MEANING: it names the gate, and it fails loudly if the `determinism`
+        # label ever empties out (a mis-tagged case, a dropped source file, a
+        # broken catch_discover_tests ADD_TAGS_AS_LABELS) instead of silently
+        # reporting green with nothing selected. `--no-tests=error` is what turns
+        # "zero tests matched" from a pass into a failure.
+        #
+        # NOTE: never set ARPBOX_REGENERATE_GOLDENS in CI. It is the write path,
+        # and by construction a run that rewrites goldens FAILS anyway
+        # (tests/support/GoldenMidiFile.h, tests/golden/README.md).
+        run: ctest --test-dir build -L determinism --output-on-failure --no-tests=error
+
       - name: Verify universal binary
         run: |
           APP="build/app/ARPBOX_artefacts/RelWithDebInfo/ARPBOX.app"

@@ -132,7 +132,13 @@ public:
     //          ppq += stepPpq)
     //         emitAt (int (blockOffsetForPpq (ppq)));
     // which is exact (see the PPQ note in the class comment) and buffer-size
-    // independent.
+    // independent. That is TRANSPORT-side exactness: the PPQ this class reports at a
+    // given absolute sample does not depend on how the blocks were carved, full stop.
+    // The SEQUENCER's placement of a boundary carries one bounded exception on top of
+    // it — a boundary inside the step-index snap window just below a block edge can be
+    // emitted up to one sample late. It belongs to the sequencer's snapping, not to
+    // anything here; see "THE SNAP-BOUNDARY WINDOW" in SequencerProcessor.h (issue
+    // #37) before quoting the line above as an unqualified guarantee.
 
     // RT-SAFE: latched.
     /** PPQ position at the FIRST sample of this block. */

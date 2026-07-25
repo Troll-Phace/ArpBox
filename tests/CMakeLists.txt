@@ -42,7 +42,6 @@ include(Catch)
 # (never in arpbox_engine / the app); see support/AllocationSentinel.h.
 add_executable(arpbox_tests
     smoke_unit.cpp
-    smoke_determinism.cpp
     smoke_midi_conformance.cpp
     smoke_perf_budget.cpp
     # Phase 2.4 infrastructure test suite.
@@ -103,6 +102,107 @@ add_executable(arpbox_tests
     # Regression guard: the REAL production format registration helper actually
     # registers VST3 + AudioUnit (guards the Phase 3 "0 formats" host-flag bug).
     hosting_formats.cpp
+    # Phase 6.4: the golden-MIDI FILE infrastructure — the on-disk half of the
+    # determinism contract (ARCHITECTURE §1.2), built and proven BEFORE the first
+    # golden is baked. support/GoldenMidiFile.h serializes a MidiRenderResult to the
+    # canonical TEXT format in tests/golden/ (see tests/golden/README.md for why text
+    # and not .mid), parses it back through a strict, exhaustively-rejecting loader,
+    # and compares on the parsed event vector. golden_format.cpp asserts each parser
+    # rejection individually and proves the regeneration interlock: a run that
+    # rewrites a golden can never also report green.
+    # The [determinism] smoke placeholder (smoke_determinism.cpp) is REPLACED by this
+    # (its own header comment named 6.4 as its successor). A REQUIRE(true) in a
+    # contract suite is itself an anti-vacuity hazard — a broken `-L determinism`
+    # selector would still have reported one passing test.
+    support/GoldenMidiFile.h
+    golden_format.cpp
+    # Phase 6.4: the two L1 pattern-core PRIMITIVES, tested against hand-derived
+    # values rather than a frozen stream — hence [unit], not [determinism]. These
+    # pin the musical semantics that 6.4's golden MIDI then freezes permanently, so
+    # they are what says a golden was baked from the RIGHT rhythm/traversal.
+    #
+    # pattern_euclid: the euclidean GATE-lane necklace, its rotation convention
+    # (positive = later, modulo steps, negative included) and the pulse-count sweep
+    # that no constant/truncating/overflowing generator survives.
+    pattern_euclid.cpp
+    # pattern_directions: the 11 §12.3 traversal tables — the nine deterministic
+    # orders pinned as literals AND compared all-pairs (a switch falling through to
+    # `up` would pass nine separate literal checks), the buildTraversal/
+    # traversalPeriod agreement sweep, and property tests for the two seeded modes.
+    pattern_directions.cpp
+    # Phase 6 task 0c: the regression guards for the two Phase-5-gate determinism
+    # findings that Phase 6's PITCH lane / pool made reachable — issue #36 (an
+    # already-due note-off must keep its TRUE sample position under a same-pitch
+    # retrigger, byte-identical from block 32 to 4096; the PRE-GOLDEN BLOCKER, since a
+    # golden baked while it was live would freeze buffer-size-dependent output as the
+    # permanent reference) and issue #37 (the one-sample snap-boundary window, whose
+    # documented bound this turns into a guard that reddens if the grid coarsens).
+    sequencer_retrigger.cpp
+    # Issue #48's permanent regression test, scoped to the whole FAILURE CLASS rather
+    # than the single instance: a note-off placed from a within-block offset instead
+    # of from its own absolute schedule (#36 / #46 / #48 — one root cause, three
+    # sites, none of them caught by the suite; with the #48 fix reverted all 189
+    # permanent tests still passed). Six scenarios cover every note-off emission
+    # path — natural gate end, both same-pitch retrigger branches, the MID-BLOCK
+    # switch flush, the block-head PRE-FLUSH sibling, the discontinuity flush, and
+    # all of them combined — each swept across the ten block sizes and compared on
+    # bytes AND event count AND CC123 placement, with a per-path reachability
+    # assertion. The 1/32 grid at 300 BPM (1200-sample steps) is what puts three
+    # steps inside one 4096-sample block; pattern_switch.cpp's 6000-sample steps
+    # structurally could not, which is the gap this file closes.
+    sequencer_offdeterminism.cpp
+    # ── Phase 6 task 12: the coverage suite for 6.1-6.3 (pattern model, lanes,
+    # polymeter, quantized switching, snapshot lifecycle). Everything the Phase 6.4
+    # golden bake depends on — these say a golden was baked from the RIGHT engine.
+    #
+    # pattern_switch: the quantized pattern switch (§5.2/§6.1) — four modes against
+    # four DISTINCT hand-computed absolute-sample literals (the control that catches a
+    # quantizer ignoring its enum), the exactly-on-a-bar-line case, the
+    # switch-to-self no-op, request-survives-stop/locate, and the §5.5 switch flush.
+    pattern_switch.cpp
+    # pattern_polymeter: the L1 lane engine against a closed form written INDEPENDENTLY
+    # in the test — the gated-step set, the 105-step combined period proven by
+    # exhaustive search, the gated-cursor rule (a rest does not consume a pool note),
+    # and GATE-as-clock-divider vs every-other-lane-as-value-hold.
+    pattern_polymeter.cpp
+    # pattern_model_unit: the message-thread half — snapshot builder (lane clamping,
+    # gate-prefix table, traversal-set dedup, byte-identical rebuilds), PatternChannel's
+    # publish/adopt/retire cycle including the displaced-publish path that a `store`
+    # instead of an `exchange` would leak, PatternDocument edits/undo/transactions, and
+    # the RetirementQueue capacity bound.
+    pattern_model_unit.cpp
+    # pattern_channel_threading: §3.4 mechanism 3 under two real threads. TSan proves
+    # race-freedom; the destructor-recorded thread id proves the OTHER half of
+    # INSTRUCTIONS' criterion — "retired snapshots freed on message thread ONLY".
+    pattern_channel_threading.cpp
+    # pattern_alloc_guard: §11's zero-allocation contract with snapshot ADOPTS and
+    # pattern-switch FLUSHES provably inside the armed region (an alloc guard around a
+    # region where nothing adopted proves nothing). Also the standing guard on the
+    # outgoing MidiBuffer's 8192-byte warm-up: two flushes in one block must not grow it.
+    pattern_alloc_guard.cpp
+    # pattern_determinism: the REPRODUCIBLE half of §1.2, distinct from the
+    # buffer-size-independent half transport_timing.cpp covers — two fresh renders of
+    # one configuration are byte-identical, which is what catches hidden global state.
+    pattern_determinism.cpp
+    # ── Phase 6 task 13: THE BAKED GOLDENS — the on-disk half of §1.2's determinism
+    # contract, and the release gate INSTRUCTIONS Phase 6.4 asks for. Six reference
+    # event streams in tests/golden/ (baseline canary, per-lane LENGTH polymeter,
+    # per-lane CLOCK-DIVISION polymeter, LEN tie/retrigger on a fractional clock, the
+    # nine deterministic §12.3 direction modes, and the euclidean GATE necklaces),
+    # each compared at ALL TEN swept block sizes so buffer-size independence and the
+    # frozen reference are checked together rather than as two separate sweeps.
+    #
+    # Everything above this line pins the SEMANTICS against hand-derived values; this
+    # file freezes the resulting BYTES. That order is deliberate: the primitives say a
+    # golden was baked from the right engine, and the golden then says the engine has
+    # not drifted since. Each case additionally carries a perturbed-render negative
+    # control (one lane value changed ⇒ must NOT match), without which a comparator
+    # that always returned true would leave all six green.
+    #
+    # `walk` and `randomNoRepeat` are deliberately NOT baked here — Phase 7.1's
+    # versioned RngStream would force an immediate regeneration. See the omission note
+    # in the file; they keep their property tests in pattern_directions.cpp.
+    determinism_goldens.cpp
     # Issue #22/#24: SynthSlot message-thread coordinator unit tests. The coordinator
     # depends only on the GUI-free app/ISynthEngine.h seam (NOT AudioEngine), so
     # app/SynthSlot.cpp compiles into this GUI-free target linking arpbox_hosting only
@@ -119,7 +219,18 @@ target_compile_features(arpbox_tests PRIVATE cxx_std_20)
 # this enables the pump API in the TEST BINARY ONLY — engine/hosting/app are
 # untouched. The bounded pump (fakes/HostingLabSupport.h) uses a hard timeout, so no
 # wall-clock sleep acts as a synchronization primitive.
-target_compile_definitions(arpbox_tests PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)
+#
+# Phase 6.4: ARPBOX_GOLDEN_DIR points support/GoldenMidiFile.h at the SOURCE-tree
+# tests/golden/ directory. This is the compiled-target analogue of the
+# `-DENGINE_DIR=${CMAKE_SOURCE_DIR}/engine` idiom used by the GUI-free check below.
+# Deliberately NOT file(COPY)'d into the build tree: a build-tree copy means editing
+# a golden and forgetting to rebuild silently reads a STALE reference and PASSES —
+# the worst failure class a determinism gate can have. The golden data files are
+# likewise NOT listed in add_executable(): listing them would make CMake re-run on
+# every golden edit, and they are read at test time, not compile time.
+target_compile_definitions(arpbox_tests PRIVATE
+    JUCE_MODAL_LOOPS_PERMITTED=1
+    ARPBOX_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
 
 # tests/ as an include root so tests reach support/ headers as
 # "support/AllocationSentinel.h" (engine headers come via arpbox_engine's exported

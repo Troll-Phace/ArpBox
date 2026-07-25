@@ -98,7 +98,7 @@ arpbox/
 ├── scanner-helper/         # separate console binary: out-of-process scans
 ├── ui/                     # component library, Tokens.h, screens
 ├── tests/                  #   unit + contract suites; fakes/ (hostile plugin corpus);
-│                           #   golden/ (determinism reference MIDI)
+│                           #   golden/ (determinism reference MIDI event streams)
 └── design/                 # arpbox_ui_mockup.html (visual reference)
 ```
 
@@ -403,9 +403,16 @@ up, down, up-down (incl. endpoints), up-down (excl.), converge, diverge, outside
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 ctest --test-dir build --output-on-failure
-ctest --test-dir build -R determinism --output-on-failure   # contract suites:
+ctest --test-dir build -L determinism --output-on-failure   # contract suites:
                         # determinism | midi-conformance | hosting-lab | perf-budget
 ```
+
+Suites are selected with `-L` (LABEL), not `-R` (name):
+`catch_discover_tests(... ADD_TAGS_AS_LABELS)` maps every Catch2 `[tag]` to a CTest
+label, which is what makes the suites independently selectable. Test cases are
+additionally named `<suite>/<unit>: <behavior>` (e.g. `determinism/golden: …`), so
+`-R determinism` also happens to match — but the label is the authoritative selector
+and the one CI uses.
 
 ---
 

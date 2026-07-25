@@ -36,6 +36,19 @@
 // first principles (bars x steps-per-bar for A, the half-open boundary count for B),
 // and config A's positions are asserted as exact absolute samples.
 //
+// THE PREMISE HAS ONE DOCUMENTED EXCEPTION, and a reader arriving from the test side
+// should know it before concluding the sweep proves an absolute guarantee. A step
+// boundary whose true position lies within `stepIndexSnapSteps` BELOW a block edge is
+// claimed by the later block, and the clamp in `SequencerProcessor::processBlock`
+// emits it at offset 0 — up to ONE SAMPLE later than a carving that puts the same
+// boundary mid-block. The step INDEX SET is unaffected (never duplicated, never
+// skipped); only placement moves, and only by a sample. The window is
+// `1e-6 x stepPpq x 60 x sampleRate / bpm` samples, so it widens with the grid — see
+// "THE SNAP-BOUNDARY WINDOW" in SequencerProcessor.h for the bound and issue #37 for
+// the decision to document rather than close it. No configuration in this file lands
+// inside the window, and none realistically can; a failure here means a real bug, not
+// that exception.
+//
 // Existing coverage NOT duplicated here: transport_clock.cpp already pins PPQ against
 // its closed form, transport-level block-size equivalence, the tempo clamp, locate,
 // the stop edges and head-node render ordering. This file is about what the SEQUENCER

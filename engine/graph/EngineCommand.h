@@ -33,8 +33,10 @@ enum class EngineCommandType : std::uint8_t
     transportStop,   ///< no payload — stop AND rewind to PPQ 0 (§5.5 flush point).
     transportLocate, ///< value.d = target PPQ (must be finite and >= 0).
     setTempoBpm,     ///< value.d = target tempo in BPM (clamped to 20..300).
-    // Later phases: pattern-switch queue, seed/DICE, commit/uncommit — appended as
-    // new enumerators above this line.
+    // ── Phase 6.1 sequencer (consumed by `SequencerProcessor`, an ICommandSink) ─
+    queuePatternSwitch, ///< targetId = pattern index 0..15; value.u = QuantizeMode.
+    // Later phases: seed/DICE, commit/uncommit — appended as new enumerators above
+    // this line.
 };
 
 /** A single POD command posted by the UI (message thread) and drained by the
@@ -59,7 +61,10 @@ enum class EngineCommandType : std::uint8_t
 struct EngineCommand
 {
     EngineCommandType type = EngineCommandType::none;
-    std::uint16_t targetId = 0; ///< Optional target (slot/param id); 0 when unused.
+    /** Optional target id; 0 when unused. FIRST REAL USE is Phase 6.1's
+        `queuePatternSwitch`, where it carries the destination pattern index
+        (0..`maxPatterns`-1). Later: FX-slot index, parameter id. */
+    std::uint16_t targetId = 0;
 
     /** Type-punned payload; the live member is fixed by `type`. */
     union Value
