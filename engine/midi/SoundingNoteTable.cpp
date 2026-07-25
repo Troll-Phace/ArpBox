@@ -56,8 +56,15 @@ void SoundingNoteTable::removeAt (int index) noexcept
     // allocation, no branching per element, and removals are rare relative to blocks.
     // The alternative — sorting at every emission point — leaves the root cause in
     // place for the next emission path to rediscover.
+    //
+    // The `+ 1` is done in the WIDE type (`std::size_t (i) + 1`), never in `int`
+    // then widened: widening after the add is the shape that can overflow before the
+    // cast ever runs. It cannot here — the loop condition bounds `i + 1` by `count`,
+    // itself bounded by `capacity` — but the narrow-add-then-widen shape is the one
+    // that bites when a bound later moves, so the repo fixes it on sight (same
+    // treatment SpscFifo's drain index got in Phase 2).
     for (int i = index; i + 1 < count; ++i)
-        entries[static_cast<std::size_t> (i)] = entries[static_cast<std::size_t> (i + 1)];
+        entries[static_cast<std::size_t> (i)] = entries[static_cast<std::size_t> (i) + 1];
 
     --count;
 }

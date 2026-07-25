@@ -13,7 +13,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
-#include <utility>
 
 namespace arpbox::engine
 {
@@ -102,17 +101,21 @@ void PatternDocument::endEdit ()
     if (transactionDepth > 0)
         return;
 
-    pushUndo (std::move (pendingUndo));
+    pushUndo (pendingUndo);
     ++revision;
     republish ();
 }
 
-void PatternDocument::pushUndo (PatternSetState&& previous)
+void PatternDocument::pushUndo (const PatternSetState& previous)
 {
     // A new edit invalidates the redo branch — standard linear-history semantics.
     redoStack.clear ();
 
-    undoStack.push_back (std::move (previous));
+    // A copy, explicitly (see the header): `PatternSetState` is trivially copyable,
+    // so there is no move to reach for and `std::move` here would only have hidden
+    // that fact. `pendingUndo` keeps its value either way — it is overwritten by the
+    // next `beginEdit`, not consumed by this call.
+    undoStack.push_back (previous);
 
     while (static_cast<int> (undoStack.size ()) > maxUndoDepth)
         undoStack.pop_front ();
@@ -439,7 +442,7 @@ void PatternDocument::endTransaction ()
         return; // Nothing happened: no undo slot, no snapshot build, no publish.
 
     transactionChanged = false;
-    pushUndo (std::move (pendingUndo));
+    pushUndo (pendingUndo);
     ++revision;
     republish ();
 }
@@ -458,8 +461,11 @@ bool PatternDocument::undo ()
     if (undoStack.empty ())
         return false;
 
-    redoStack.push_back (std::move (current));
-    current = std::move (undoStack.back ());
+    // Three ~24 KB copies' worth of traffic, and no `std::move` to pretend otherwise:
+    // a trivially-copyable state has no cheaper transfer to ask for. The pop is what
+    // releases the old entry, not a move out of it.
+    redoStack.push_back (current);
+    current = undoStack.back ();
     undoStack.pop_back ();
 
     ++revision;
@@ -480,8 +486,9 @@ bool PatternDocument::redo ()
     if (redoStack.empty ())
         return false;
 
-    undoStack.push_back (std::move (current));
-    current = std::move (redoStack.back ());
+    // Mirror of `undo` — copies, for the same reason.
+    undoStack.push_back (current);
+    current = redoStack.back ();
     redoStack.pop_back ();
 
     ++revision;

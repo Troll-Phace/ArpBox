@@ -275,7 +275,15 @@ private:
     void endEdit ();
 
     // Pushes `previous` onto the undo stack, clears redo, and enforces the cap.
-    void pushUndo (PatternSetState&& previous);
+    //
+    // BY CONST REFERENCE, AND THE COPY IS THE POINT. `PatternSetState` is trivially
+    // copyable by design — that is exactly what makes this POD state stack viable
+    // instead of linking juce_data_structures for `juce::UndoManager` (see the class
+    // comment). A trivially-copyable type has no move that differs from its copy, so
+    // a `&&` parameter here would advertise a transfer that cannot happen and every
+    // `std::move` at a call site would be a no-op decoration. The ~24 KB copy into
+    // the deque is unavoidable and already budgeted: `maxUndoDepth` × 24 KB ≈ 6 MB.
+    void pushUndo (const PatternSetState& previous);
 
     // Publishes to `publishTarget` when one is attached.
     void republish ();
