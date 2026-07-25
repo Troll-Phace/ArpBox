@@ -28,13 +28,29 @@ int numDiscoverableInCorpus ()
     return count;
 }
 
+const std::vector<FakeSpec>& auxiliaryCorpus ()
+{
+    // NOT part of canonicalCorpus() on purpose — see the header note. These are
+    // instrumentation instances, constructed directly by the tests that need them;
+    // FakePluginFormat never enumerates them, so no scan-count assertion moves.
+    // UIDs continue the canonical sequence so the two lists can never collide.
+    static const std::vector<FakeSpec> corpus {
+        { FakeBehavior::playHeadObserving, "arpbox.fake.playhead-observer", "ARPBOX Fake PlayHead Observer", true, false, 0x0FA0E101 },
+    };
+    return corpus;
+}
+
 const FakeSpec& specFor (FakeBehavior behavior)
 {
     for (const auto& spec : canonicalCorpus ())
         if (spec.behavior == behavior)
             return spec;
 
-    jassertfalse; // Asked for a behavior not in the corpus.
+    for (const auto& spec : auxiliaryCorpus ())
+        if (spec.behavior == behavior)
+            return spec;
+
+    jassertfalse; // Asked for a behavior in neither corpus.
     return canonicalCorpus ().front ();
 }
 
@@ -78,6 +94,11 @@ std::unique_ptr<AudioPluginInstance> makeFakeInstance (const FakeSpec& spec)
 
         case FakeBehavior::busLying:
             return std::make_unique<BusLyingFake> (spec);
+
+        case FakeBehavior::playHeadObserving:
+            // Auxiliary instrumentation fake (auxiliaryCorpus): never reached via a
+            // scan, only via a direct makeFakeInstance (specFor (...)) in a test.
+            return std::make_unique<PlayHeadObservingFake> (spec);
 
         case FakeBehavior::crashOnScan:
         default:
