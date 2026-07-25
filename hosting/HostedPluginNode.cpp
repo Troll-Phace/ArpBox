@@ -101,16 +101,15 @@ void HostedPluginNode::negotiateBusLayout ()
         return inner->setBusesLayout (layout);
     };
 
-    bool ok = false;
-
-    if (trySetOutput (AudioChannelSet::stereo ()))
-        ok = true;
-    else if (trySetOutput (AudioChannelSet::mono ()))
-        ok = true;
-    else if (inner->checkBusesLayoutSupported (inner->getBusesLayout ()))
-        ok = true; // Keep whatever it already has, if that is valid.
-    else if (inner->enableAllBuses ())
-        ok = true;
+    // Short-circuit chain: '||' stops at the first success and evaluates side
+    // effects strictly left-to-right, so this is behaviour-identical to the
+    // previous if/else-if ladder (each branch bodied `ok = true`) while avoiding
+    // the bugprone-branch-clone repeated-body diagnostic. The third clause keeps
+    // whatever layout the plugin already has, if that is valid.
+    const bool ok = trySetOutput (AudioChannelSet::stereo ())
+                 || trySetOutput (AudioChannelSet::mono ())
+                 || inner->checkBusesLayoutSupported (inner->getBusesLayout ())
+                 || inner->enableAllBuses ();
 
     if (! ok)
     {
