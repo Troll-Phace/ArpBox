@@ -35,6 +35,8 @@
 
 #include "engine/graph/EngineCommand.h"
 #include "engine/graph/Transport.h"
+#include "engine/sequencer/PatternChannel.h"
+#include "engine/sequencer/PatternDocument.h"
 #include "engine/sequencer/SequencerProcessor.h"
 
 #include <cmath>
@@ -98,6 +100,18 @@ inline engine::EngineCommand engineCommand (engine::EngineCommandType type, doub
     return command;
 }
 
+/** A `queuePatternSwitch` command (§5.2 quantized apply, §6.1): `targetId` carries the
+    destination pattern index and `value.u` the `QuantizeMode` ordinal, exactly as
+    `SequencerProcessor::applyCommand` decodes them. */
+inline engine::EngineCommand patternSwitchCommand (int patternIndex, engine::QuantizeMode quantize) noexcept
+{
+    engine::EngineCommand command {};
+    command.type = engine::EngineCommandType::queuePatternSwitch;
+    command.targetId = static_cast<std::uint16_t> (patternIndex);
+    command.value.u = static_cast<std::uint32_t> (quantize);
+    return command;
+}
+
 /** A command to apply at the head of the block containing `atSample`. */
 struct ScheduledCommand
 {
@@ -123,18 +137,54 @@ inline bool scheduleIsBlockAligned (const std::vector<ScheduledCommand>& schedul
 // The rig
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** A prepared `Transport` + `SequencerProcessor` pair, wired as the graph wires
-    them. Both members are public: tests drive the transport directly (that IS the
-    head node's job) and read the sounding-note table straight off the node. */
+/** A prepared `Transport` + `PatternDocument` + `PatternChannel` +
+    `SequencerProcessor` set, wired as the graph wires them. All members are public:
+    tests drive the transport directly (that IS the head node's job), edit the
+    document (which republishes automatically), and read the sounding-note table
+    straight off the node.
+
+    ── WHY THE DOCUMENT AND CHANNEL ARE HERE ───────────────────────────────────
+    Since Phase 6 the node plays the adopted `PatternSnapshot`, not a hardcoded
+    pattern, so a rig without a publisher would render pure silence. The
+    DEFAULT-CONSTRUCTED document reproduces the Phase-5 scaffold exactly (see the
+    ctor note in PatternDocument.h), which is why the timing and lifecycle suites
+    written against `scaffold*` still hold with no change to their expectations.
+
+    MEMBER ORDER IS A LIFETIME CONTRACT, the same one `EngineGraph` documents:
+    channel, then document (it points at the channel), then transport, then the node
+    (it points at both the transport and the channel, and hands its held snapshot
+    back to the channel in its destructor). Destruction is reverse-declaration, so
+    the node dies first and the channel last. */
 struct SequencerRig
 {
-    /** Prepares both objects at `sampleRate` / `blockSize` and injects the transport
-        into the sequencer, exactly as `EngineGraph::buildGraph` does. */
+    /** Prepares everything at `sampleRate` / `blockSize`, primes the channel with one
+        snapshot and injects the shared state, exactly as `EngineGraph::buildGraph`
+        does — publish BEFORE the first block, or block 0 has nothing to adopt. */
     SequencerRig (double sampleRate, int blockSize)
     {
         transport.prepare (sampleRate);
-        sequencer.setSharedState (&transport);
+
+        patternDocument.setPublishTarget (&patternChannel);
+        patternDocument.publishTo (patternChannel);
+
+        sequencer.setSharedState (&transport, &patternChannel);
         sequencer.prepareToPlay (sampleRate, blockSize);
+    }
+
+    /** THE COMMAND FAN-OUT, exactly as `EngineGraph` wires it
+        (`transportProcessor->setCommandSinks ({ &transport, master, sequencer, … })`):
+        every sink sees every command and ignores what it does not own, and the
+        TRANSPORT IS FIRST because it is the only sink whose state the others read.
+
+        Without this the rig could only deliver the four transport commands, and
+        `queuePatternSwitch` — which `SequencerProcessor` consumes as an `ICommandSink`,
+        not through any document edit — would be untestable at rig level. Transport
+        commands behave exactly as before: `SequencerProcessor::applyCommand` falls
+        through every type it does not own. */
+    void applyCommand (const engine::EngineCommand& command) noexcept
+    {
+        transport.applyCommand (command);
+        sequencer.applyCommand (command);
     }
 
     /** Head-node emulation for a single block: latch the transport, then render the
@@ -146,8 +196,11 @@ struct SequencerRig
         sequencer.processBlock (audio, midi);
     }
 
-    engine::Transport transport;          ///< The musical clock (drive it as the head node would).
-    engine::SequencerProcessor sequencer; ///< The node under test.
+    // Declaration order is load-bearing — see the note above.
+    engine::PatternChannel patternChannel;   ///< §3.4 mechanism 3: publish / adopt / retire.
+    engine::PatternDocument patternDocument; ///< Message-thread model; republishes on every edit.
+    engine::Transport transport;             ///< The musical clock (drive it as the head node would).
+    engine::SequencerProcessor sequencer;    ///< The node under test.
 };
 
 /** Renders `config.numBlocks` blocks of `rig`, applying each scheduled command at the
@@ -170,7 +223,7 @@ renderSequencer (SequencerRig& rig, const MidiRenderConfig& config, const std::v
 
                                 for (const auto& entry : schedule)
                                     if (entry.atSample >= context.blockBase && entry.atSample < blockEnd)
-                                        rig.transport.applyCommand (entry.command);
+                                        rig.applyCommand (entry.command);
 
                                 rig.transport.beginBlock (context.numSamples);
                             });

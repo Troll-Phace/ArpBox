@@ -140,7 +140,7 @@ standalone commit (`ARPBOX_ALLOW_FORMAT_FIX=1 ... format-fix`).
 | `hosting/`        | Plugin scan/instantiate/persist, HostedPluginNode wrapper, editor windows |
 | `scanner-helper/` | Separate console binary for out-of-process plugin scans |
 | `ui/`             | Component library, design tokens, screens |
-| `tests/`          | Unit + contract suites (Catch2 v3 via CTest); `tests/fakes/` hostile-plugin corpus; `tests/golden/` determinism reference MIDI |
+| `tests/`          | Unit + contract suites (Catch2 v3 via CTest); `tests/fakes/` hostile-plugin corpus; `tests/golden/` determinism reference MIDI event streams |
 | `design/`         | UI visual reference — [`design/arpbox_ui_mockup.html`](design/arpbox_ui_mockup.html) |
 
 CI (`.github/workflows/ci.yml`) configures, builds both arches, runs the test

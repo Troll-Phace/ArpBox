@@ -87,13 +87,14 @@ void EngineGraph::buildGraph ()
     const auto midiInNode = graph.addNode (std::move (midiIn));
     midiInputNodeId = midiInNode->nodeID;
 
-    // ARP ENGINE node (§3.3, Phase 5.2): reads the transport, passes the live MIDI-in
-    // stream through untouched and ADDS the generated arp events. Inject the transport
-    // before insertion — it is declared before `graph` (see the header's member-order
-    // contract), so it outlives this node. Left MIDI-unconnected downstream until a
-    // synth is set; `setSynth()` wires `Seq → synth`.
+    // ARP ENGINE node (§3.3, Phase 5.2/6): reads the transport, adopts pattern
+    // snapshots from the pattern channel, passes the live MIDI-in stream through
+    // untouched and ADDS the generated arp events. Inject both before insertion — the
+    // transport and the channel are declared before `graph` (see the header's
+    // member-order contract), so they outlive this node. Left MIDI-unconnected
+    // downstream until a synth is set; `setSynth()` wires `Seq → synth`.
     auto sequencer = std::make_unique<SequencerProcessor> ();
-    sequencer->setSharedState (&transport);
+    sequencer->setSharedState (&transport, &patternChannel);
     sequencerProcessor = sequencer.get ();
     const auto sequencerNode = graph.addNode (std::move (sequencer));
     sequencerNodeId = sequencerNode->nodeID;
@@ -119,14 +120,20 @@ void EngineGraph::buildGraph ()
     masterNodeId = masterNode->nodeID;
 
     // Command fan-out (ICommandSink.h): the transport consumes the four transport
-    // commands, the master consumes gain/limiter/tone. Every sink sees every command
-    // and ignores what it does not own. Two spare slots remain.
+    // commands, the master consumes gain/limiter/tone, and the SEQUENCER consumes
+    // Phase 6's `queuePatternSwitch`. Every sink sees every command and ignores what
+    // it does not own. ONE spare slot remains.
     //
-    // The Phase-5.2 sequencer node deliberately claims NEITHER: its scaffold pattern is
-    // fixed and it derives everything it needs from the transport it already reads, so
-    // registering it as a sink would add an unused dispatch path. It claims a slot when
-    // it first has commands of its own — the Phase 6 quantized pattern switch.
-    transportProcessor->setCommandSinks ({ &transport, masterProcessor, nullptr, nullptr });
+    // DISPATCH ORDER IS THE ARRAY ORDER, and the transport must stay first: it is the
+    // only sink whose state the others read. Note that all of this runs BEFORE
+    // `Transport::beginBlock()`, which is why the sequencer's `applyCommand` only
+    // RECORDS a switch request and computes its boundary later (see
+    // SequencerProcessor.h).
+    //
+    // Everything else Phase 6 added — euclid, direction, lane edits, grid, pool — is a
+    // DOCUMENT edit and reaches the audio thread as a `PatternSnapshot`, not as a
+    // command. Do not add command types for them.
+    transportProcessor->setCommandSinks ({ &transport, masterProcessor, sequencerProcessor, nullptr });
 
     // IO nodes, added LAST (see the insertion-order note above). audioOutput is the
     // sink; audioInput and the graph's own midiInput IO node are added for topology
@@ -189,6 +196,32 @@ void EngineGraph::buildGraph ()
     // sample-count playhead (it only does so when `getPlayHead() == nullptr`), so
     // ours is the only playhead hosted plugins ever see (§3.3).
     graph.setPlayHead (&playHead);
+
+    // PATTERN DATA (§3.4 mechanism 3): attach the channel as the document's publish
+    // target, so every committed edit rebuilds and republishes automatically, then
+    // PRIME it with one snapshot. `setPublishTarget` deliberately does not publish, and
+    // without this first `publishTo` the sequencer node would have nothing adopted on
+    // its first block and would render silence until the user's first edit.
+    patternDocument.setPublishTarget (&patternChannel);
+    patternDocument.publishTo (patternChannel);
+}
+
+// MESSAGE-THREAD ONLY:
+void EngineGraph::reclaimRetiredPatterns () noexcept
+{
+    patternChannel.reclaim ();
+}
+
+// MESSAGE-THREAD ONLY:
+int EngineGraph::getNumPendingRetirements () const noexcept
+{
+    return patternChannel.getNumPendingRetirements ();
+}
+
+// MESSAGE-THREAD ONLY:
+std::uint64_t EngineGraph::getDroppedRetirementCount () const noexcept
+{
+    return patternChannel.getDroppedRetirementCount ();
 }
 
 // MESSAGE-THREAD ONLY:

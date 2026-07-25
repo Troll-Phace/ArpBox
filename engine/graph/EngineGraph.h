@@ -1,6 +1,8 @@
 #pragma once
 
 #include "../EngineGuiGuard.h"
+#include "../sequencer/PatternChannel.h"
+#include "../sequencer/PatternDocument.h"
 #include "../sequencer/SequencerProcessor.h"
 #include "DeviceStatus.h"
 #include "EngineCommand.h"
@@ -65,9 +67,17 @@ namespace arpbox::engine
 
     COMMAND-DRAIN ARRANGEMENT (Phase 5.1): the single command queue has exactly ONE
     consumer — the `TransportProcessor` head node. It drains once per block and fans
-    each command out to the registered `ICommandSink`s (the `Transport` and the
-    `MasterProcessor`). See ICommandSink.h for the fan-out contract and ToneControl.h
-    for why the tone commands still cross to the tone node through an atomic shim. */
+    each command out to the registered `ICommandSink`s (the `Transport`, the
+    `MasterProcessor` and, since Phase 6, the `SequencerProcessor`). See ICommandSink.h
+    for the fan-out contract and ToneControl.h for why the tone commands still cross to
+    the tone node through an atomic shim.
+
+    PATTERN DATA (Phase 6): this object also owns §3.4's THIRD channel — the
+    `PatternChannel` the sequencer node adopts `PatternSnapshot`s from — and, for now,
+    the `PatternDocument` that produces them (see the member's note; Phase 11 moves the
+    document into the Project object). `buildGraph()` attaches the channel as the
+    document's publish target and primes it with one snapshot, so the node has pattern
+    data on its very first block. */
 class EngineGraph
 {
 public:
@@ -138,6 +148,46 @@ public:
         return *sequencerProcessor;
     }
 
+    // ── Pattern model (Phase 6) ──────────────────────────────────────────────
+
+    // MESSAGE-THREAD ONLY (producer side of §3.4's third channel). `buildGraph()`
+    // attaches the channel as this document's publish target, so every committed edit
+    // rebuilds and publishes a snapshot automatically — no extra call needed.
+    /** The editable pattern model; edits reach the audio thread as snapshots. */
+    PatternDocument& patterns () noexcept { return patternDocument; }
+
+    // MESSAGE-THREAD ONLY (observation): `reclaim()` / `peekPending()` / the counters.
+    // HEADLESS TESTS ONLY — they drive both sides of the channel by hand, with no real
+    // audio thread. The channel's `adopt` / `retire` are the AUDIO thread's half of a
+    // strict SPSC pair and its `publish` belongs to the document; calling any of the
+    // three through this handle while audio is running breaks the single-producer /
+    // single-consumer contract. App code uses the three narrow methods below and
+    // `patterns()`, never this.
+    /** The pattern publish/adopt/retire channel. Tests only — see the threading note. */
+    PatternChannel& patternSnapshots () noexcept { return patternChannel; }
+
+    // MESSAGE-THREAD ONLY: deletes every `PatternSnapshot` the audio thread has
+    // retired. THE APP MUST CALL THIS ON ITS UI TICK (`DebugPanel::refreshFromEngine`
+    // does, from the vblank — never a `juce::Timer`, prohibited by code-style.md).
+    // `PatternDocument::publishTo` also reclaims, but only as a side effect of
+    // EDITING: a session that plays for an hour without a single document edit would
+    // otherwise never drain the queue, and the audio thread retires a snapshot on
+    // every adoption. A steady tick is the design; the publish-path reclaim is the
+    // safety net.
+    /** Frees all retired pattern snapshots (message-thread reclamation, §3.4). */
+    void reclaimRetiredPatterns () noexcept;
+
+    // MESSAGE-THREAD ONLY: observation, for the debug readout.
+    /** Retired snapshots awaiting `reclaimRetiredPatterns()` (advisory). */
+    int getNumPendingRetirements () const noexcept;
+
+    // MESSAGE-THREAD ONLY: observation, for the debug readout.
+    /** Retirements dropped because the retirement queue was full. EACH ONE IS A
+        LEAKED SNAPSHOT (the queue deliberately never frees on the audio thread), so a
+        non-zero value is a defect, not a statistic — it means the message thread is
+        not reclaiming often enough. Must stay 0. */
+    std::uint64_t getDroppedRetirementCount () const noexcept;
+
     // ── Synth slot: type-agnostic graph topology API (§3.3, §6.3) ────────────
 
     // MESSAGE-THREAD ONLY: inserts (or swaps in) the synth instance, wiring
@@ -201,6 +251,22 @@ private:
     NoteEventQueue noteQueue;                 ///< QWERTY/pad channel; MIDI-In node consumes.
     juce::MidiMessageCollector midiCollector; ///< Hardware MIDI; fed off the MIDI thread, drained by the MIDI-In node.
     MidiInputControl midiControl;             ///< MIDI-In channel mask / voice count / flush.
+
+    // §3.4's THIRD cross-thread mechanism, and its message-thread producer. Same
+    // lifetime rule as everything above: declared before `graph`, so the sequencer
+    // node (which holds a non-owning pointer to the channel and, between adoptions, a
+    // pointer to a snapshot the channel's destructor reclaims) dies FIRST.
+    //
+    // ORDER WITHIN THE PAIR MATTERS TOO: the document holds a publish-target pointer
+    // to the channel, so it must be destroyed first — hence channel, then document.
+    PatternChannel patternChannel; ///< Publish/adopt/retire channel for PatternSnapshot.
+
+    /** The authoritative editable pattern model. TEMPORARY HOME: Phase 11's Project
+        object owns the document (alongside the rack, master and MIDI config, §8.1)
+        and the graph merely borrows it. It lives here now because the sequencer node
+        needs a published snapshot from its very first block and nothing above the
+        engine exists yet to provide one. */
+    PatternDocument patternDocument;
 
     // Transport clock + the playhead wrapping it. Declared HERE (before `graph`) for
     // the same lifetime reason as the channels above: the transport node, the master

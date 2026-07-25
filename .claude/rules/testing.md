@@ -19,7 +19,7 @@ paths:
 ## Catch2 Patterns
 - Framework: Catch2 v3 via CTest (`ctest --test-dir build --output-on-failure`)
 - Engine tests run headless: construct engine objects directly, call `prepareToPlay(48000, 128)` + `processBlock` in a loop — no audio device, no message loop
-- Golden-MIDI determinism suite: (pattern, seeds, N bars) → rendered `MidiBuffer` stream serialized and compared byte-for-byte against `tests/golden/*.mid`. Any diff is a FAILURE — saved projects must never change sound across versions. Regenerating goldens requires an explicit justification in the PR body
+- Golden-MIDI determinism suite: (pattern, seeds, N bars) → rendered `MidiBuffer` stream serialized and compared byte-for-byte against `tests/golden/*` — the canonical TEXT event-stream format (absolute sample + raw MIDI bytes), NOT `.mid`; format, rationale and regeneration procedure are in `tests/golden/README.md`, machinery in `tests/support/GoldenMidiFile.h`. Any diff is a FAILURE — saved projects must never change sound across versions. Regenerating goldens requires an explicit justification in the PR body, and the regeneration path is built so it can never itself produce a green run
 - Hanging-note fuzzer: property test that randomly churns transport/pattern/pool/plugin-swap events and asserts the sounding-note table is empty after all-notes-off
 - RT-safety: audio-thread code paths run under TSan/ASan CI jobs; allocation guards (overridden operator new counter) assert zero allocations inside processBlock during steady-state tests
 

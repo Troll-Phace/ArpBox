@@ -1,6 +1,8 @@
 // TEMPORARY DEBUG UI — replaced by the real UI in Phase 15+.
 #include "DebugPanel.h"
 
+#include "engine/sequencer/PatternDocument.h"
+#include "engine/sequencer/PatternTypes.h"
 #include "hosting/PluginManager.h"
 
 namespace arpbox::app
@@ -98,6 +100,29 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     bpmSlider.setValue (engine::Transport::defaultBpm, dontSendNotification);
     bpmSlider.setTextValueSuffix (" BPM");
     bpmSlider.onValueChange = [this] { pushDouble (engine::EngineCommandType::setTempoBpm, bpmSlider.getValue ()); };
+
+    // ── Pattern switch (DEV-ONLY; the real 16-pad strip lands in Phase 17.3) ──
+    // "Make Audible" is a DOCUMENT edit (message thread, direct — snapshots reach the
+    // audio thread by pointer swap); "Queue Switch" is a COMMAND (§3.4 channel 1) the
+    // sequencer node resolves to a step index and fires at the chosen boundary.
+    addAndMakeVisible (patternSelect);
+    for (int i = 0; i < engine::maxPatterns; ++i)
+        patternSelect.addItem ("pattern " + String (i), i + 1); // item ids are 1-based
+    patternSelect.setSelectedId (2, dontSendNotification);      // pattern 1: the switch target
+
+    addAndMakeVisible (quantizeSelect);
+    // Item id == QuantizeMode ordinal + 1 (0 is "nothing selected" in a ComboBox).
+    quantizeSelect.addItem ("instant", static_cast<int> (engine::QuantizeMode::instant) + 1);
+    quantizeSelect.addItem ("beat", static_cast<int> (engine::QuantizeMode::beat) + 1);
+    quantizeSelect.addItem ("bar", static_cast<int> (engine::QuantizeMode::bar) + 1);
+    quantizeSelect.addItem ("pattern end", static_cast<int> (engine::QuantizeMode::patternEnd) + 1);
+    quantizeSelect.setSelectedId (static_cast<int> (engine::QuantizeMode::bar) + 1, dontSendNotification);
+
+    addAndMakeVisible (switchPatternButton);
+    switchPatternButton.onClick = [this] { queueSelectedPatternSwitch (); };
+
+    addAndMakeVisible (fillPatternButton);
+    fillPatternButton.onClick = [this] { fillSelectedPattern (); };
 
     // ── Simulate device loss (dev-only) ──────────────────────────────────────
     addAndMakeVisible (simulateLossButton);
@@ -311,6 +336,66 @@ void DebugPanel::runPluginScan ()
     scanJustFinished.store (true, std::memory_order_release);
 }
 
+// ── Pattern switch (DEV-ONLY) ─────────────────────────────────────────────────
+
+// MESSAGE-THREAD ONLY. Pushes `queuePatternSwitch` onto the canonical command queue.
+// The sequencer node RECORDS it during the transport head node's drain and resolves
+// the boundary at the top of the next block (see SequencerProcessor.h) — the panel
+// does no timing arithmetic of its own.
+void DebugPanel::queueSelectedPatternSwitch ()
+{
+    const int patternIndex = patternSelect.getSelectedId () - 1;
+    const int quantizeOrdinal = quantizeSelect.getSelectedId () - 1;
+
+    // Nothing selected yet (ComboBox id 0) ⇒ negative here. The sequencer rejects an
+    // out-of-range command anyway, but do not push a malformed one.
+    if (patternIndex < 0 || patternIndex >= engine::maxPatterns || quantizeOrdinal < 0 ||
+        quantizeOrdinal > static_cast<int> (engine::QuantizeMode::patternEnd))
+        return;
+
+    pushTargeted (engine::EngineCommandType::queuePatternSwitch,
+                  static_cast<std::uint16_t> (patternIndex),
+                  static_cast<std::uint32_t> (quantizeOrdinal));
+}
+
+// MESSAGE-THREAD ONLY. Direct `PatternDocument` edit — the §4 message-thread edit
+// flow, NOT the command queue. The document republishes automatically (the graph
+// attached the channel as its publish target), the audio thread adopts the new
+// snapshot at its next block head, and the retired one comes back through the
+// retirement queue that the vblank reclaims.
+//
+// WHY THIS BUTTON EXISTS: the default document leaves patterns 1–15 with GATE all
+// off, so switching to pattern 1 out of the box produces SILENCE — which cannot tell
+// the user whether the switch landed on the bar line or three bars later. This makes
+// the destination loudly different from pattern 0's ascending scaffold: every step
+// gated, one octave up, descending. Removed with this panel in Phase 15+.
+void DebugPanel::fillSelectedPattern ()
+{
+    const int patternIndex = patternSelect.getSelectedId () - 1;
+    if (patternIndex < 0 || patternIndex >= engine::maxPatterns)
+        return;
+
+    auto& document = audioEngine.patterns ();
+
+    // One transaction ⇒ one undo entry and ONE snapshot build/publish for the whole
+    // gesture, instead of 193 of them (PatternDocument.h). Every step of the lane's
+    // 64-slot STORAGE is written, not just the 16 currently active: values at or
+    // beyond `length` are stored but never played, so filling them costs nothing and
+    // keeps the pattern coherent if the lane is later lengthened.
+    document.beginTransaction ();
+
+    for (int step = 0; step < engine::maxSteps; ++step)
+    {
+        document.setLaneValue (patternIndex, engine::LaneId::gate, step, 1);
+        document.setLaneValue (patternIndex, engine::LaneId::oct, step, 1);
+        document.setLaneValue (patternIndex, engine::LaneId::vel, step, 120);
+    }
+
+    document.setDirection (patternIndex, engine::DirectionMode::down);
+
+    document.endTransaction ();
+}
+
 // ── Synth slot (DEV-ONLY) ─────────────────────────────────────────────────────
 
 // MESSAGE-THREAD ONLY. Repopulates the combo from the known-plugin list, keeping
@@ -426,6 +511,19 @@ void DebugPanel::resized ()
         bpmSlider.setBounds (r);
     }
 
+    // ── Pattern switch (DEV-ONLY) ────────────────────────────────────────────
+    area.removeFromTop (12);
+    {
+        auto r = row (30);
+        patternSelect.setBounds (r.removeFromLeft (140));
+        r.removeFromLeft (8);
+        quantizeSelect.setBounds (r.removeFromLeft (140));
+        r.removeFromLeft (8);
+        switchPatternButton.setBounds (r.removeFromLeft (150));
+        r.removeFromLeft (8);
+        fillPatternButton.setBounds (r.removeFromLeft (150));
+    }
+
     area.removeFromTop (12);
     simulateLossButton.setBounds (row (32).removeFromLeft (240));
 
@@ -453,9 +551,14 @@ void DebugPanel::resized ()
     }
     synthStatusLabel.setBounds (row (24));
 
-    // On-screen / QWERTY keyboard occupies the bottom strip.
+    // On-screen / QWERTY keyboard occupies the bottom strip, 60..96 px of WHATEVER
+    // THE ROWS ABOVE LEFT. Not a fixed 96 any more: the Phase-6 pattern row pushed the
+    // stack to within a few pixels of the 800 px minimum window height (MainWindow's
+    // setResizeLimits), and an over-tall keyboard would squeeze the rows above it to
+    // zero height rather than shrink itself. The floor keeps it playable at the
+    // minimum size; extra height the user drags out widens it up to the old 96.
     area.removeFromTop (12);
-    keyboard.setBounds (area.removeFromBottom (96));
+    keyboard.setBounds (area.removeFromBottom (jlimit (60, 96, area.getHeight ())));
 }
 
 // MESSAGE-THREAD ONLY (vblank ~60 fps).
@@ -466,6 +569,14 @@ void DebugPanel::refreshFromEngine ()
     // performs the graph edit only once it is genuinely silent.
     synthSlot.poll ();
     refreshSynthStatus ();
+
+    // Drain §3.4 channel 3's return path on the SAME UI tick (again: NOT a
+    // juce::Timer). The audio thread retires a superseded `PatternSnapshot` on every
+    // adoption and never frees one; this is where those ~100 KB objects actually die.
+    // `PatternDocument::publishTo` reclaims too, but only when the user EDITS — a long
+    // playback session with no edits would otherwise let the retirement queue fill and
+    // start DROPPING (i.e. leaking) retirements. Cheap when empty.
+    audioEngine.reclaimRetiredPatterns ();
 
     const auto& snapshot = audioEngine.snapshots ().read ();
 
@@ -508,8 +619,18 @@ void DebugPanel::refreshFromEngine ()
                 "type " + String (static_cast<int> (e.type)) + " (a=" + String (e.a) + ", b=" + String (e.b) + ")";
         });
 
+    // Engine bookkeeping line. `snap dropped` is NOT a statistic: the retirement queue
+    // deliberately never frees on the audio thread, so every dropped retirement is a
+    // LEAKED PatternSnapshot. It must read 0 — a non-zero value means this tick is not
+    // reclaiming fast enough (or is not running at all). `pending` is advisory and is
+    // normally 0 or 1 between ticks.
+    const auto droppedSnapshots = audioEngine.getDroppedRetirementCount ();
+
     eventLabel.setText ("events: " + String (engineEventCount) + " [" + lastEventText + "]" +
-                            "  |  dropped cmds: " + String (audioEngine.commands ().getDroppedCount ()),
+                            "  |  dropped cmds: " + String (audioEngine.commands ().getDroppedCount ()) +
+                            "  |  snap pending: " + String (audioEngine.getNumPendingRetirements ()) +
+                            "  dropped: " + String (droppedSnapshots) +
+                            (droppedSnapshots != 0 ? String ("  [SNAPSHOT LEAK]") : String ()),
                         dontSendNotification);
 
     // ── Plugin scan (DEV-ONLY) ───────────────────────────────────────────────
@@ -659,6 +780,16 @@ void DebugPanel::pushBare (engine::EngineCommandType type)
 {
     engine::EngineCommand command; // value stays default-initialised (unused)
     command.type = type;
+    audioEngine.commands ().push (command);
+}
+
+// MESSAGE-THREAD ONLY.
+void DebugPanel::pushTargeted (engine::EngineCommandType type, std::uint16_t targetId, std::uint32_t value)
+{
+    engine::EngineCommand command;
+    command.type = type;
+    command.targetId = targetId;
+    command.value.u = value;
     audioEngine.commands ().push (command);
 }
 } // namespace arpbox::app

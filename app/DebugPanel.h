@@ -105,6 +105,21 @@ private:
     // play/stop).
     void pushBare (engine::EngineCommandType type);
 
+    // MESSAGE-THREAD ONLY: pushes a command carrying BOTH a target id and an unsigned
+    // payload. `queuePatternSwitch` is the first such command (targetId = destination
+    // pattern index, value.u = QuantizeMode).
+    void pushTargeted (engine::EngineCommandType type, std::uint16_t targetId, std::uint32_t value);
+
+    // MESSAGE-THREAD ONLY (DEV-ONLY): queues the selected pattern switch at the
+    // selected quantize boundary. The COMMAND path (§3.4 channel 1).
+    void queueSelectedPatternSwitch ();
+
+    // MESSAGE-THREAD ONLY (DEV-ONLY): rewrites the selected pattern into something
+    // audibly distinct from the default pattern-0 scaffold, so a quantized switch can
+    // actually be HEARD landing on its boundary. The DOCUMENT path (§3.4 channel 3) —
+    // a direct `PatternDocument` edit, never the command queue, and never from audio.
+    void fillSelectedPattern ();
+
     AudioEngine& audioEngine;              ///< Non-owning; owned by the application.
     hosting::PluginManager& pluginManager; ///< Non-owning; owned by the application.
     bool& scanForceKilledSink;             ///< App-owned; set true iff the scan worker was force-killed at teardown.
@@ -121,6 +136,16 @@ private:
     juce::TextButton stopButton { "Stop" };
     juce::Slider bpmSlider; ///< Tempo in BPM (20..300, §12.1 / Transport).
     juce::Label bpmLabel { {}, "BPM" };
+
+    // ── Pattern switch (DEV-ONLY scaffolding; real pad strip is Phase 17.3) ───
+    // Exercises BOTH Phase-6 paths from the UI: the quantized switch COMMAND and a
+    // crude `PatternDocument` edit that makes the destination pattern audible (the
+    // default document leaves patterns 1–15 GATE-off, i.e. silent, so switching to
+    // one would prove nothing about where the switch landed).
+    juce::ComboBox patternSelect;  ///< Destination pattern 0..15.
+    juce::ComboBox quantizeSelect; ///< instant | beat | bar | patternEnd.
+    juce::TextButton switchPatternButton { "Queue Switch" };
+    juce::TextButton fillPatternButton { "Make Audible" };
 
     // ── On-screen / QWERTY keyboard (note input → engine note FIFO) ──────────
     juce::MidiKeyboardState keyboardState;

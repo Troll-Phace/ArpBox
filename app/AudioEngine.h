@@ -85,6 +85,31 @@ public:
     /** Discrete engine→UI event queue (audio thread is the only producer). */
     engine::EngineEventQueue& events () noexcept { return graph.events (); }
 
+    // ── Pattern model (§3.4 channel 3; Phase 6) ──────────────────────────────
+
+    // MESSAGE-THREAD ONLY (producer side of the pattern channel). Every committed
+    // edit rebuilds an immutable `PatternSnapshot` and publishes it automatically —
+    // the graph attached the channel as the document's publish target at build time.
+    // Document edits do NOT go through the command queue; only the quantized pattern
+    // SWITCH does (`EngineCommandType::queuePatternSwitch`).
+    /** The editable pattern model (message-thread authoritative state). */
+    engine::PatternDocument& patterns () noexcept { return graph.patterns (); }
+
+    // MESSAGE-THREAD ONLY: must be called on the UI tick — see the note on
+    // `EngineGraph::reclaimRetiredPatterns`. Snapshots the audio thread retired are
+    // freed HERE, never on the audio thread.
+    /** Frees all retired pattern snapshots. */
+    void reclaimRetiredPatterns () noexcept { graph.reclaimRetiredPatterns (); }
+
+    // MESSAGE-THREAD ONLY: observation, for the debug readout.
+    /** Retired pattern snapshots awaiting reclamation (advisory). */
+    int getNumPendingRetirements () const noexcept { return graph.getNumPendingRetirements (); }
+
+    // MESSAGE-THREAD ONLY: observation, for the debug readout. A non-zero value means
+    // a LEAKED snapshot — see `EngineGraph::getDroppedRetirementCount`.
+    /** Pattern retirements dropped because the retirement queue was full. */
+    std::uint64_t getDroppedRetirementCount () const noexcept { return graph.getDroppedRetirementCount (); }
+
     // ── QWERTY/pad note input (message thread → note FIFO → MIDI-In node) ─────
 
     // MESSAGE-THREAD ONLY (producer side of the note channel §3.3). Pushes a POD

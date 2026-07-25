@@ -559,9 +559,18 @@ TEST_CASE ("sequencer/lifecycle: a scripted transport script leaves zero orphan 
 TEST_CASE ("sequencer/lifecycle: seeded transport churn leaves no stuck note", "[unit][midi-conformance]")
 {
     // The Phase-5 ancestor of Phase 8.3's hanging-note fuzzer: random play / stop /
-    // locate / tempo churn, rendered block by block (never slept on), asserting the
-    // §5.5 invariants at the end. Every run takes an explicit, printed seed so a
-    // failure reproduces from the seed alone (.claude/rules/testing.md).
+    // locate / tempo / PATTERN-SWITCH churn, rendered block by block (never slept
+    // on), asserting the §5.5 invariants at the end. Every run takes an explicit,
+    // printed seed so a failure reproduces from the seed alone
+    // (.claude/rules/testing.md).
+    //
+    // PHASE 6 ADDED THE PATTERN SWITCH TO THE ALPHABET, and it is the most
+    // interesting letter in it: it is the only flush point that lands MID-BLOCK, at
+    // a resolved step's own offset, rather than at a block head — and it interacts
+    // with the other three (a stop or locate invalidates a resolved switch but keeps
+    // the request, so a switch can fire an arbitrary time after it was asked for, on
+    // a timeline that has moved underneath it). Randomising all four together is the
+    // only cheap way to reach those orderings.
     //
     // Bounded on purpose (≈4k blocks per seed) so it stays a per-commit test; Phase 8
     // scales it to the 10k-event runs its own success criterion asks for.
@@ -572,31 +581,60 @@ TEST_CASE ("sequencer/lifecycle: seeded transport churn leaves no stuck note", "
     SequencerRig rig { testSampleRate, testBlockSize };
     NoteLifecycleTracker tracker;
 
+    // Make a SECOND pattern audible, with a longer gate than the default 50% so a
+    // switch flush has notes to release. A churn over patterns that are all silent
+    // would exercise the switch machinery without ever testing its flush.
+    {
+        auto& document = rig.patternDocument;
+        document.beginTransaction ();
+        for (int step = 0; step < arpbox::engine::maxSteps; ++step)
+        {
+            document.setLaneValue (1, arpbox::engine::LaneId::gate, step, 1);
+            document.setLaneValue (1, arpbox::engine::LaneId::len, step, 150);
+            document.setLaneValue (1, arpbox::engine::LaneId::vel, step, 111);
+        }
+        document.endTransaction ();
+    }
+
     juce::AudioBuffer<float> audio (1, testBlockSize);
     juce::MidiBuffer midi;
     midi.ensureSize (8192);
 
-    std::uniform_int_distribution<int> action (0, 9);
+    std::uniform_int_distribution<int> action (0, 11);
     std::uniform_int_distribution<int> blocksToRun (1, 40);
     std::uniform_real_distribution<double> locateTarget (0.0, 32.0);
     std::uniform_real_distribution<double> tempoBpm (20.0, 300.0);
+    std::uniform_int_distribution<int> switchTarget (0, 2);
+    std::uniform_int_distribution<int> switchQuantize (0, static_cast<int> (arpbox::engine::QuantizeMode::patternEnd));
 
     constexpr int iterations = 200;
     int maxTableSize = 0;
     int unsortedBlocks = 0;
+    int switchesQueued = 0;
 
     for (int it = 0; it < iterations; ++it)
     {
         const int a = action (rng);
 
-        if (a <= 3) // play (40%) — keeps the transport running most of the time
-            rig.transport.applyCommand (engineCommand (EngineCommandType::transportPlay));
-        else if (a <= 5) // stop (20%) — the primary flush point
-            rig.transport.applyCommand (engineCommand (EngineCommandType::transportStop));
-        else if (a <= 7) // locate (20%) — the position-jump flush point
-            rig.transport.applyCommand (engineCommand (EngineCommandType::transportLocate, locateTarget (rng)));
-        else // tempo change (20%) — re-anchors the clock under sounding notes
-            rig.transport.applyCommand (engineCommand (EngineCommandType::setTempoBpm, tempoBpm (rng)));
+        if (a <= 3) // play (33%) — keeps the transport running most of the time
+            rig.applyCommand (engineCommand (EngineCommandType::transportPlay));
+        else if (a <= 5) // stop (17%) — the primary flush point
+            rig.applyCommand (engineCommand (EngineCommandType::transportStop));
+        else if (a <= 7) // locate (17%) — the position-jump flush point
+            rig.applyCommand (engineCommand (EngineCommandType::transportLocate, locateTarget (rng)));
+        else if (a <= 9) // tempo change (17%) — re-anchors the clock under sounding notes
+            rig.applyCommand (engineCommand (EngineCommandType::setTempoBpm, tempoBpm (rng)));
+        else // pattern switch (17%) — the mid-block flush point (§5.2, §6.1)
+        {
+            // Target 2 is deliberately a SILENT pattern (patterns 1..15 default to
+            // GATE off, and only 1 was made audible above): switching into silence
+            // and back out of it is where an unflushed note would hang inaudibly for
+            // the rest of the run and only surface in the final balance.
+            rig.applyCommand (arpbox::testing::patternSwitchCommand (
+                switchTarget (rng),
+                static_cast<arpbox::engine::QuantizeMode> (switchQuantize (rng))));
+            ++switchesQueued;
+        }
 
         const int blocks = blocksToRun (rng);
         for (int block = 0; block < blocks; ++block)
@@ -622,15 +660,17 @@ TEST_CASE ("sequencer/lifecycle: seeded transport churn leaves no stuck note", "
 
     // Finish on a flush point: after a stop, the table MUST be empty and every note
     // the run started MUST have been released.
-    rig.transport.applyCommand (engineCommand (EngineCommandType::transportStop));
+    rig.applyCommand (engineCommand (EngineCommandType::transportStop));
     midi.clear ();
     rig.renderBlock (audio, midi);
     tracker.observeBuffer (midi);
 
     INFO (tracker.describe ());
     INFO ("max simultaneous sounding notes = " << maxTableSize);
+    INFO ("pattern switches queued = " << switchesQueued);
 
     REQUIRE (unsortedBlocks == 0);
+    REQUIRE (switchesQueued > 10);         // the new letter really appeared
     REQUIRE (tracker.noteOnsSeen () > 50); // non-vacuous
     REQUIRE (tracker.orphanNoteOffs () == 0);
     REQUIRE (tracker.outstanding () == 0);
@@ -664,17 +704,23 @@ TEST_CASE ("midi/sounding-table: find locates a sounding pitch per channel", "[u
     REQUIRE (table.find (2, 60) == -1);
     REQUIRE (table.find (1, 61) == -1);
 
-    // Retiring removes the entry (and only that entry).
-    table.retireAt (table.find (1, 60), midi, 4);
+    // Retiring removes the entry (and only that entry). The cap (996) is earlier than
+    // the entry's own due sample (1000), so the off lands at the cap: block [0, 128)
+    // starting at absolute 992 ⇒ offset 4.
+    table.retireNoLaterThan (table.find (1, 60), midi, 996, 992, 128);
     REQUIRE (table.find (1, 60) == -1);
     REQUIRE (table.find (1, 64) >= 0);
     REQUIRE (table.find (5, 60) >= 0);
     REQUIRE (table.size () == 2);
     REQUIRE (countIf (midi, isNoteOffMessage) == 1);
+    {
+        auto iterator = midi.begin ();
+        REQUIRE ((*iterator).samplePosition == 4);
+    }
 
     // Out-of-range indices are ignored rather than corrupting the table.
-    table.retireAt (-1, midi, 0);
-    table.retireAt (99, midi, 0);
+    table.retireNoLaterThan (-1, midi, 0, 0, 128);
+    table.retireNoLaterThan (99, midi, 0, 0, 128);
     REQUIRE (table.size () == 2);
 }
 
@@ -707,7 +753,7 @@ TEST_CASE ("midi/sounding-table: overflow drops the note-on and never a note-off
 
     // Every held note is released — a full table is exactly when a dropped note-off
     // would be catastrophic.
-    table.flush (midi, 0);
+    table.flush (midi, 0, 128, 0);
     REQUIRE (countIf (midi, isNoteOffMessage) == SoundingNoteTable::capacity);
     REQUIRE (countIf (midi, isAllNotesOffMessage) == 2); // only channels 1 and 2 sounded
     REQUIRE (table.isEmpty ());
@@ -776,13 +822,239 @@ TEST_CASE ("midi/sounding-table: the due window is half-open on the exact sample
     REQUIRE (table.size () == 1);
 }
 
+TEST_CASE ("midi/sounding-table: dueOffsetWithinBlock agrees with emitDueNoteOffs", "[unit]")
+{
+    // ── THE ANTI-DRIFT GUARD ─────────────────────────────────────────────────
+    // Since #48 the due-sample → block-offset conversion lives in ONE PRIVATE CHOKE
+    // POINT, `SoundingNoteTable::offsetForSample`, and every emission path in the
+    // class routes through it (see "THE PLACEMENT RULE" in SoundingNoteTable.h). No
+    // public method takes a within-block offset any more — `retireAt(offset)` and
+    // `flush(offset)` are deleted; `retireNoLaterThan` and `flush` take ABSOLUTE
+    // samples and convert internally. `SequencerProcessor::emitStep`'s same-pitch
+    // retrigger path goes through `retireNoLaterThan`, so the sequencer never
+    // performs this arithmetic itself.
+    //
+    // `dueOffsetWithinBlock` is therefore an OBSERVATION accessor with ZERO ENGINE
+    // CALLERS (SoundingNoteTable.h documents it as such): a range-checked public view
+    // of the private conversion, existing so a test can ask where an entry's off will
+    // land. That is precisely what makes it a drift risk. Nothing on the shipping path
+    // exercises it, so it could quietly stop describing the real placement while every
+    // assertion in this file that reads an offset through it went on passing — a §1.2
+    // hazard the slow way, an observer that makes a buffer-size-dependent placement
+    // bug look green (the #36/#46/#48 failure mode, which a green suite hid for a
+    // phase).
+    //
+    // This case is the guard against that: for the same entry and the same block, the
+    // offset the ACCESSOR REPORTS and the offset the EMITTER ACTUALLY WRITES must be
+    // one number — across the boundary cases below and the 250-triple sweep at the end.
+    struct DueCase
+    {
+        std::int64_t blockStart;
+        int numSamples;
+        std::int64_t due;
+        int expected; ///< The offset the shared conversion must produce.
+        const char* what;
+    };
+
+    const DueCase cases[] = {
+        { 0, 128, 0, 0, "due exactly at block start" },
+        { 1000, 128, 1000, 0, "due exactly at block start, non-zero origin" },
+        { 1000, 128, 1050, 50, "mid-block" },
+        { 1000, 128, 1127, 127, "the LAST sample in the block" },
+        { 5000, 128, 10, 0, "already in the PAST — clamped to 0, never dropped" },
+        { 5000, 128, 4999, 0, "one sample in the past — clamped to 0" },
+        { 0, 1, 0, 0, "a single-sample block" },
+        // The #36 shape itself: a 4096-sample block at the 1/32 grid, where step k's
+        // off (600) and step k+1's on (1200) share a block.
+        { 0, 4096, 600, 600, "the #36 shape — an interior due sample in a large block" },
+        // Beyond the half-open window: `emitDueNoteOffs` does NOT emit these, but the
+        // query still answers with the upper clamp rather than a garbage offset.
+        { 1000, 128, 1128, 127, "due at the EXCLUSIVE end — upper clamp, not emitted" },
+        { 1000, 128, 9999, 127, "far in the future — upper clamp, not emitted" },
+    };
+
+    for (const auto& testCase : cases)
+    {
+        INFO (testCase.what << ": blockStart " << testCase.blockStart << ", numSamples " << testCase.numSamples
+                            << ", due " << testCase.due);
+
+        SoundingNoteTable query;
+        REQUIRE (query.add (1, 60, testCase.due));
+        REQUIRE (query.dueOffsetWithinBlock (0, testCase.blockStart, testCase.numSamples) == testCase.expected);
+
+        SoundingNoteTable emitter;
+        juce::MidiBuffer emitted;
+        REQUIRE (emitter.add (1, 60, testCase.due));
+        emitter.emitDueNoteOffs (emitted, testCase.blockStart, testCase.numSamples);
+
+        const bool dueInsideBlock =
+            testCase.due < testCase.blockStart + static_cast<std::int64_t> (testCase.numSamples);
+
+        if (dueInsideBlock)
+        {
+            REQUIRE (countIf (emitted, isNoteOffMessage) == 1);
+            REQUIRE (emitter.isEmpty ());
+            auto iterator = emitted.begin ();
+            REQUIRE ((*iterator).samplePosition == testCase.expected); // THE agreement
+        }
+        else
+        {
+            REQUIRE (emitted.isEmpty ());
+            REQUIRE (emitter.size () == 1); // still owed, will be emitted by a later block
+        }
+    }
+
+    // ── The "no valid offset exists" contract ────────────────────────────────
+    {
+        SoundingNoteTable table;
+        juce::MidiBuffer midi;
+
+        // Empty table: index 0 is out of range even though it is a legal-looking index.
+        REQUIRE (table.dueOffsetWithinBlock (0, 0, 128) == -1);
+
+        REQUIRE (table.add (1, 60, 64));
+        REQUIRE (table.dueOffsetWithinBlock (-1, 0, 128) == -1);
+        REQUIRE (table.dueOffsetWithinBlock (1, 0, 128) == -1); // one past the live count
+        REQUIRE (table.dueOffsetWithinBlock (99, 0, 128) == -1);
+        REQUIRE (table.dueOffsetWithinBlock (SoundingNoteTable::capacity, 0, 128) == -1);
+
+        // A non-positive block has no offsets at all — and the emitter agrees by
+        // emitting nothing rather than by writing offset 0.
+        REQUIRE (table.dueOffsetWithinBlock (0, 0, 0) == -1);
+        REQUIRE (table.dueOffsetWithinBlock (0, 0, -5) == -1);
+        table.emitDueNoteOffs (midi, 0, 0);
+        REQUIRE (midi.isEmpty ());
+        REQUIRE (table.size () == 1);
+    }
+
+    // ── `isDueAtOrBefore` — the predicate that SELECTS the conversion ────────
+    {
+        // `emitStep` uses this to pick the CAP it hands `retireNoLaterThan`: `onSample`
+        // when the off was already owed, `onSample - 1` when the note is still sounding
+        // and must be cut a sample short. Both are ABSOLUTE samples, and since #48 a cap
+        // can only shorten — so an already-owed entry keeps its own due sample whichever
+        // branch is taken, and this predicate now decides only how far a still-sounding
+        // note may be shortened. The boundary is inclusive: due == the note-on's sample
+        // means the off was already owed.
+        SoundingNoteTable table;
+        REQUIRE (table.add (1, 60, 1000));
+
+        REQUIRE (table.isDueAtOrBefore (0, 1000)); // exactly at — ALREADY owed
+        REQUIRE (table.isDueAtOrBefore (0, 1001));
+        REQUIRE (table.isDueAtOrBefore (0, 999) == false); // still sounding
+        REQUIRE (table.isDueAtOrBefore (-1, 1000) == false);
+        REQUIRE (table.isDueAtOrBefore (1, 1000) == false);
+    }
+
+    // ── The sweep: many (blockStart, numSamples, due) triples, aggregated ────
+    // No Catch2 macros inside the loop (house rule) — mismatches are counted and
+    // asserted after, with the first offending triple recorded for diagnosis.
+    int comparisons = 0;
+    int mismatches = 0;
+    int emittedCount = 0;
+    int deferredCount = 0;
+    std::int64_t firstBadBlockStart = 0;
+    int firstBadNumSamples = 0;
+    std::int64_t firstBadDue = 0;
+    bool sawMismatch = false;
+
+    for (const std::int64_t blockStart : { std::int64_t { 0 },
+                                           std::int64_t { 1 },
+                                           std::int64_t { 999 },
+                                           std::int64_t { 48000 },
+                                           std::int64_t { 1000000003 } })
+    {
+        for (const int numSamples : { 1, 32, 128, 1200, 4096 })
+        {
+            for (const std::int64_t delta : { std::int64_t { -5000 },
+                                              std::int64_t { -1 },
+                                              std::int64_t { 0 },
+                                              std::int64_t { 1 },
+                                              std::int64_t { 599 },
+                                              std::int64_t { 600 },
+                                              std::int64_t { 1199 },
+                                              std::int64_t { 4095 },
+                                              std::int64_t { 4096 },
+                                              std::int64_t { 100000 } })
+            {
+                const std::int64_t due = blockStart + delta;
+
+                SoundingNoteTable query;
+                query.add (1, 60, due);
+                const int expected = query.dueOffsetWithinBlock (0, blockStart, numSamples);
+
+                SoundingNoteTable emitter;
+                juce::MidiBuffer emitted;
+                emitter.add (1, 60, due);
+                emitter.emitDueNoteOffs (emitted, blockStart, numSamples);
+
+                const bool dueInsideBlock = due < blockStart + static_cast<std::int64_t> (numSamples);
+                bool bad = false;
+
+                if (dueInsideBlock)
+                {
+                    ++emittedCount;
+                    ++comparisons;
+
+                    int seen = -1;
+                    int count = 0;
+                    for (const auto meta : emitted)
+                    {
+                        seen = meta.samplePosition;
+                        ++count;
+                    }
+
+                    // The agreement, plus the range contract `offsetForSample`'s two
+                    // clamps exist to hold: an offset handed to `juce::MidiBuffer` is
+                    // always inside [0, numSamples).
+                    bad = (count != 1) || (seen != expected) || (expected < 0) || (expected >= numSamples);
+                }
+                else
+                {
+                    ++deferredCount;
+                    bad = ! emitted.isEmpty () || emitter.size () != 1;
+                }
+
+                if (bad)
+                {
+                    ++mismatches;
+                    if (! sawMismatch)
+                    {
+                        sawMismatch = true;
+                        firstBadBlockStart = blockStart;
+                        firstBadNumSamples = numSamples;
+                        firstBadDue = due;
+                    }
+                }
+            }
+        }
+    }
+
+    INFO ("swept " << (emittedCount + deferredCount) << " triples: " << emittedCount << " emitted (" << comparisons
+                   << " offset comparisons), " << deferredCount << " deferred to a later block");
+    INFO ("first mismatch at blockStart " << firstBadBlockStart << ", numSamples " << firstBadNumSamples << ", due "
+                                          << firstBadDue);
+
+    REQUIRE (mismatches == 0);
+    // Non-vacuity: the sweep really exercised BOTH sides of the half-open window, so a
+    // matrix that accidentally deferred everything could not report green.
+    REQUIRE (emittedCount + deferredCount == 250);
+    REQUIRE (comparisons > 100);
+    REQUIRE (deferredCount > 0);
+}
+
 TEST_CASE ("midi/sounding-table: the same-pitch retrigger policy emits off-then-on with a 1-sample gap",
            "[unit][midi-conformance]")
 {
     // §5.5 overlap policy: "same-pitch retrigger ⇒ note-off then note-on with a
     // 1-sample gap". `SequencerProcessor::emitStep` implements it as
-    // `retireAt (find (ch, note), midi, jmax (0, offset - 1))` followed by the note-on
-    // at `offset` — but the SCAFFOLD PATTERN cannot reach it (no two consecutive steps
+    // `retireNoLaterThan (find (ch, note), midi, onSample - 1, blockStart, numSamples)`
+    // followed by the note-on at `offset` — the cap is an ABSOLUTE sample precisely so
+    // the gap cannot be collapsed by a buffer size that puts the on at offset 0 (#46),
+    // and so an already-due off keeps its own sample (#36/#48). The two sections below
+    // pin the still-sounding case; the already-due case is covered by the anti-drift
+    // guard above and by the cross-size sweeps in sequencer_retrigger.cpp.
+    // The SCAFFOLD PATTERN cannot reach any of it (no two consecutive steps
     // share a pitch, and a pitch only recurs 8 steps later, far beyond the 50% gate).
     // Phase 6's PITCH lane exercises it immediately; until then this case pins the two
     // primitives the policy is composed from, including the platform assumption at
@@ -795,9 +1067,14 @@ TEST_CASE ("midi/sounding-table: the same-pitch retrigger policy emits off-then-
         REQUIRE (table.add (1, 60, 5000)); // note 60 already sounding
 
         constexpr int offset = 64;
+        constexpr std::int64_t blockStart = 0;
+        constexpr int numSamples = 128;
+        constexpr std::int64_t onSample = blockStart + offset;
+
         const int existing = table.find (1, 60);
         REQUIRE (existing >= 0);
-        table.retireAt (existing, midi, juce::jmax (0, offset - 1));
+        // Still sounding (due 5000 > onSample) ⇒ cut short at `onSample - 1`.
+        table.retireNoLaterThan (existing, midi, onSample - 1, blockStart, numSamples);
         addRawNoteOn (midi, 1, 60, 100, offset);
 
         REQUIRE (table.find (1, 60) == -1); // the old voice is no longer tracked
@@ -832,7 +1109,12 @@ TEST_CASE ("midi/sounding-table: the same-pitch retrigger policy emits off-then-
         REQUIRE (table.add (1, 60, 5000));
         const int existing = table.find (1, 60);
         REQUIRE (existing >= 0);
-        table.retireAt (existing, midi, juce::jmax (0, 0 - 1));
+        // `onSample - 1` is the LAST SAMPLE OF THE PREVIOUS BLOCK, which this render
+        // can no longer reach — the conversion's lower clamp puts it at offset 0. In
+        // the sequencer this shape is avoided upstream (`cutoffForSamePitch` schedules
+        // the off when the note is registered, so the previous block emits it); here it
+        // pins the fallback and the platform assumption it rests on.
+        table.retireNoLaterThan (existing, midi, -1, 0, 128);
         addRawNoteOn (midi, 1, 60, 100, 0);
 
         std::vector<juce::MidiMessage> messages;
@@ -862,8 +1144,10 @@ TEST_CASE ("midi/sounding-table: flush sweeps CC123 only on channels it sounded 
     REQUIRE (table.add (5, 72, 1000));
     REQUIRE (table.add (5, 79, 1000));
 
+    // Release from absolute 9 in the block [0, 128): every entry is still sounding
+    // (due 1000), so all three are cut short at `releaseFrom - 1` = offset 8.
     constexpr int flushOffset = 8;
-    table.flush (midi, flushOffset);
+    table.flush (midi, 0, 128, 9);
 
     REQUIRE (table.isEmpty ());
     REQUIRE (countIf (midi, isNoteOffMessage) == 3); // one per sounding note
@@ -893,7 +1177,7 @@ TEST_CASE ("midi/sounding-table: flush sweeps CC123 only on channels it sounded 
     // safety net) harmless to live THRU notes.
     juce::MidiBuffer quiet;
     SoundingNoteTable emptyTable;
-    emptyTable.flush (quiet, 0);
+    emptyTable.flush (quiet, 0, 128, 0);
     REQUIRE (quiet.isEmpty ());
 
     // `reset()` is the teardown path: forgets everything and emits nothing.

@@ -1,0 +1,25 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ARPBOX — Git attributes
+#
+# Scope note: this file intentionally does NOT set a repo-wide `* text=auto`.
+# That has checkout-wide implications for every tracked file and belongs in its
+# own deliberate change, not smuggled in alongside the golden format.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Determinism goldens (ARCHITECTURE §1.2, docs/INSTRUCTIONS.md Phase 6.4) ────
+# tests/golden/ holds the reference MIDI event streams the determinism gate
+# compares against, in the canonical text format documented in
+# tests/golden/README.md. Force LF on checkout AND on checkin:
+#
+#   • The comparison is byte-exact on the parsed event stream, and the loader in
+#     tests/support/GoldenMidiFile.h REJECTS a carriage return outright. A CRLF
+#     checkout would turn every golden into a parse error.
+#   • This is not theoretical: a Windows port is on the §2.2 roadmap, and
+#     core.autocrlf=true is the Git for Windows default.
+#
+# Deliberately NOT set here:
+#   • `linguist-generated` — it collapses the diff on GitHub, which is the exact
+#     opposite of what "a golden diff is a FINDING" needs. The diff must be read.
+#   • a merge driver — a conflict in a golden should be LOUD and resolved by a
+#     human deciding which performance is correct, never auto-merged.
+tests/golden/** text eol=lf

@@ -20,9 +20,17 @@
 //   • `TimedMidiEvent` compares BYTE-FOR-BYTE (position + raw MIDI bytes), so two
 //     renders are equal iff they are the same performance.
 //   • `MidiRenderResult::toByteStream()` is a canonical, lossless, self-describing
-//     serialization — the byte-identical comparison target for `tests/golden/`
-//     (a `juce::MidiFile` writer can be layered on top when 6.4 needs `.mid` on
-//     disk; absolute sample positions survive either way).
+//     serialization — the byte-identical comparison target for `tests/golden/`.
+//     PHASE 6.4 RESOLVED THE "OR .mid?" QUESTION: the golden format is canonical
+//     TEXT (absolute sample + raw MIDI bytes per line), NOT a `juce::MidiFile`. An
+//     SMF stores TICKS, so 1 tick = 1 sample needs a fabricated 3000-6000 BPM tempo
+//     map that differs per sample rate; and `MidiFile::writeTo`'s running-status /
+//     varlen encoding means a JUCE submodule bump could turn every golden red with
+//     zero engine change — a gate that fires on the wrong signal trains people to
+//     regenerate. See tests/support/GoldenMidiFile.h and tests/golden/README.md.
+//     The SMF writer's home is Phase 18 (§9 MIDI drag-out), where exported `.mid`
+//     is a PRODUCT OUTPUT tested against these files. Absolute sample positions
+//     survive either way, which is why this header needed no change.
 //   • `firstDifference()` / `describeDifference()` exist because a bare
 //     `REQUIRE (a == b)` on 200-event vectors produces an undiagnosable wall of
 //     text. Always `INFO (a.describeDifference (b))` before the REQUIRE.

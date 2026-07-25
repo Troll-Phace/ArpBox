@@ -60,6 +60,29 @@ add_library(arpbox_engine STATIC
     midi/SoundingNoteTable.cpp
     sequencer/SequencerProcessor.h
     sequencer/SequencerProcessor.cpp
+    # Phase 6 pattern-model primitives (ARCHITECTURE §5.1 L0/L1, §12.1, §12.3).
+    # Standalone building blocks with no engine dependencies beyond each other:
+    # the shared lane/pattern vocabulary, the stub note-pool view, and the two
+    # MESSAGE-THREAD table generators (euclidean GATE necklace, direction-mode
+    # traversal orders) whose output the audio thread only ever reads.
+    midi/NotePool.h
+    sequencer/PatternTypes.h
+    sequencer/Euclid.h
+    sequencer/Euclid.cpp
+    sequencer/DirectionModes.h
+    sequencer/DirectionModes.cpp
+    # Phase 6.1 pattern model + ARCHITECTURE §3.4's THIRD cross-thread mechanism.
+    # PatternSnapshot is the immutable, trivially-copyable object the audio thread
+    # reads (all 16 patterns in one publication, plus the precomputed gate-prefix
+    # and pool-traversal tables that keep the step tick O(1) and stateless);
+    # PatternChannel is the publish/adopt/retire binding over graph/RetirementQueue.h
+    # (its first production consumer); PatternDocument is the MESSAGE-THREAD-ONLY
+    # editable model with transactional undo that feeds them.
+    sequencer/PatternSnapshot.h
+    sequencer/PatternSnapshot.cpp
+    sequencer/PatternChannel.h
+    sequencer/PatternDocument.h
+    sequencer/PatternDocument.cpp
     EngineGuiGuard.h)
 
 target_compile_features(arpbox_engine PUBLIC cxx_std_20)

@@ -14,7 +14,7 @@ allowed-tools: Bash(git *) Read Grep
 3. Safety checks:
    - Verify no .env, secrets, credentials, signing identities, or API keys are staged
    - Verify no large binary files are staged (built plugins, .app bundles, DMGs)
-   - Verify no `tests/golden/*.mid` changes are staged without a justification line ready for the commit body
+   - Verify no `tests/golden/*` changes are staged without a justification line ready for the commit body (the goldens are canonical TEXT event streams, not `.mid` — see `tests/golden/README.md`; the glob covers every future golden type: Phase 7 condition matrices, Phase 12/13 operator goldens)
    - Check that lockfiles aren't accidentally modified
 4. Run the test suite if any source files changed: `ctest --test-dir build --output-on-failure`
 5. Stage relevant files (specific files, NOT `git add .` or `git add -A`)

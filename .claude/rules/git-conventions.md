@@ -17,7 +17,7 @@ Examples:
 - Never force-push to main/master
 - Stage specific files, not `git add .`
 - Never commit .env, secrets, credentials, or signing identities
-- Never regenerate `tests/golden/*.mid` files in a commit without an explicit justification line in the body
+- Never regenerate `tests/golden/*` files in a commit without an explicit justification line in the body (goldens are canonical TEXT event streams, not `.mid` — see `tests/golden/README.md`)
 - PR titles under 70 characters
 - PR body includes: Summary, Test Plan, and phase reference
 
