@@ -138,7 +138,8 @@ TEST_CASE ("graph/engine-graph: safety limiter bounds a hot signal", "[unit]")
     hotGain.value.f = 40.0f;
     REQUIRE (graph.commands ().push (hotGain));
 
-    const auto settle = [&] {
+    const auto settle = [&]
+    {
         for (int i = 0; i < 80; ++i) // > 20 ms gain ramp + limiter release
         {
             buffer.clear ();
@@ -225,9 +226,9 @@ TEST_CASE ("graph/master: recovers from a NaN/Inf input block (limiter not poiso
     {
         float* const d = buffer.getWritePointer (ch);
         for (int s = 0; s < buffer.getNumSamples (); ++s)
-            d[s] = (s % 3 == 0) ? std::numeric_limits<float>::quiet_NaN ()
-                 : (s % 3 == 1) ? std::numeric_limits<float>::infinity ()
-                                : -std::numeric_limits<float>::infinity ();
+            d[s] = (s % 3 == 0)   ? std::numeric_limits<float>::quiet_NaN ()
+                   : (s % 3 == 1) ? std::numeric_limits<float>::infinity ()
+                                  : -std::numeric_limits<float>::infinity ();
     }
     master.processBlock (buffer, midi);
     REQUIRE (allFinite (buffer)); // output scrub keeps the graph boundary finite

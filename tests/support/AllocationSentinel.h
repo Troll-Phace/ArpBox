@@ -72,7 +72,8 @@ class AllocationSentinel
 public:
     /** Captures the current counts and arms counting on this thread. */
     AllocationSentinel () noexcept
-        : startAllocs (allocationCount ()), startFrees (deallocationCount ())
+        : startAllocs (allocationCount ())
+        , startFrees (deallocationCount ())
     {
         setAllocationCounterArmed (true);
     }

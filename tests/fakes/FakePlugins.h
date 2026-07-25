@@ -97,8 +97,7 @@ const FakeSpec& specFor (FakeBehavior behavior);
 /** Builds the PluginDescription a scan would produce for `spec`, stamped with
     `formatName` (defaults to kFakeFormatName). Centralised so the format's
     findAllTypesForFile and the tests agree byte-for-byte. */
-juce::PluginDescription makeDescription (const FakeSpec& spec,
-                                         const juce::String& formatName = kFakeFormatName);
+juce::PluginDescription makeDescription (const FakeSpec& spec, const juce::String& formatName = kFakeFormatName);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fake instances
@@ -199,9 +198,7 @@ protected:
         // the instantiate-success test can assert the instance is live (non-silent).
         const float amplitude = activeVoices > 0 ? 0.25f : 0.0f;
         for (int channel = 0; channel < buffer.getNumChannels (); ++channel)
-            juce::FloatVectorOperations::fill (buffer.getWritePointer (channel),
-                                               amplitude,
-                                               buffer.getNumSamples ());
+            juce::FloatVectorOperations::fill (buffer.getWritePointer (channel), amplitude, buffer.getNumSamples ());
     }
 
     static constexpr char kStateTag[4] = { 'A', 'F', 'K', '1' };
@@ -232,7 +229,10 @@ private:
 class AllocateInProcessFake final : public FakePluginInstance
 {
 public:
-    explicit AllocateInProcessFake (FakeSpec spec) : FakePluginInstance (spec) {}
+    explicit AllocateInProcessFake (FakeSpec spec)
+        : FakePluginInstance (spec)
+    {
+    }
 
     void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) override
     {
@@ -256,7 +256,8 @@ private:
 class WrongLatencyFake final : public FakePluginInstance
 {
 public:
-    explicit WrongLatencyFake (FakeSpec spec) : FakePluginInstance (spec)
+    explicit WrongLatencyFake (FakeSpec spec)
+        : FakePluginInstance (spec)
     {
         setLatencySamples (kWrongLatencySamples);
     }
@@ -274,7 +275,10 @@ public:
 class StateCorruptingFake final : public FakePluginInstance
 {
 public:
-    explicit StateCorruptingFake (FakeSpec spec) : FakePluginInstance (spec) {}
+    explicit StateCorruptingFake (FakeSpec spec)
+        : FakePluginInstance (spec)
+    {
+    }
 
     void getStateInformation (juce::MemoryBlock& destData) override
     {
@@ -298,7 +302,10 @@ private:
 class BusLyingFake final : public FakePluginInstance
 {
 public:
-    explicit BusLyingFake (FakeSpec spec) : FakePluginInstance (spec) {}
+    explicit BusLyingFake (FakeSpec spec)
+        : FakePluginInstance (spec)
+    {
+    }
 
     bool isBusesLayoutSupported (const BusesLayout&) const override
     {
@@ -315,14 +322,14 @@ public:
     when a wrapper forgets to forward the playhead to the instance it owns. */
 struct PlayHeadObservation
 {
-    std::int64_t blockIndex = 0;    ///< 0-based, counted by the fake itself.
-    bool hadPlayHead = false;       ///< getPlayHead() was non-null.
-    bool hadPosition = false;       ///< getPosition() returned a value.
-    double bpm = 0.0;               ///< Reported tempo (0 if absent).
-    double ppqPosition = -1.0;      ///< Reported PPQ (-1 if absent).
-    double ppqOfLastBarStart = -1.0;///< Reported bar-start PPQ (-1 if absent).
-    std::int64_t timeInSamples = -1;///< Reported timeline sample (-1 if absent).
-    bool isPlaying = false;         ///< Reported play state.
+    std::int64_t blockIndex = 0;     ///< 0-based, counted by the fake itself.
+    bool hadPlayHead = false;        ///< getPlayHead() was non-null.
+    bool hadPosition = false;        ///< getPosition() returned a value.
+    double bpm = 0.0;                ///< Reported tempo (0 if absent).
+    double ppqPosition = -1.0;       ///< Reported PPQ (-1 if absent).
+    double ppqOfLastBarStart = -1.0; ///< Reported bar-start PPQ (-1 if absent).
+    std::int64_t timeInSamples = -1; ///< Reported timeline sample (-1 if absent).
+    bool isPlaying = false;          ///< Reported play state.
 };
 
 /** Instrument fake that records, every `processBlock`, what the host's

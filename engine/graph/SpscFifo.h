@@ -107,10 +107,7 @@ public:
     // RT-SAFE: observation-only, callable from either side.
     /** Total number of items ever dropped by `push()` because the queue was full.
         Monotonic; useful for diagnostics / an overflow indicator in the UI. */
-    std::uint64_t getDroppedCount () const noexcept
-    {
-        return droppedCount.load (std::memory_order_relaxed);
-    }
+    std::uint64_t getDroppedCount () const noexcept { return droppedCount.load (std::memory_order_relaxed); }
 
 private:
     juce::AbstractFifo fifo { static_cast<int> (Capacity) };

@@ -15,8 +15,7 @@ namespace
 } // namespace
 
 TestToneProcessor::TestToneProcessor ()
-    : juce::AudioProcessor (BusesProperties ().withOutput (
-          "Output", juce::AudioChannelSet::stereo (), true))
+    : juce::AudioProcessor (BusesProperties ().withOutput ("Output", juce::AudioChannelSet::stereo (), true))
 {
 }
 
@@ -45,8 +44,7 @@ void TestToneProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     if (numChannels <= 0 || numSamples <= 0)
         return;
 
-    const float freqHz =
-        juce::jlimit (minToneHz, maxToneHz, toneControl->frequencyHz.load (std::memory_order_relaxed));
+    const float freqHz = juce::jlimit (minToneHz, maxToneHz, toneControl->frequencyHz.load (std::memory_order_relaxed));
     const double increment = twoPi * static_cast<double> (freqHz) / currentSampleRate;
 
     // Synthesise once into channel 0, then copy to the rest — one sin() per sample.

@@ -88,9 +88,7 @@ class PlayHeadProbe final : public juce::AudioProcessor
 {
 public:
     PlayHeadProbe ()
-        : juce::AudioProcessor (BusesProperties ().withOutput ("Output",
-                                                              juce::AudioChannelSet::stereo (),
-                                                              true))
+        : juce::AudioProcessor (BusesProperties ().withOutput ("Output", juce::AudioChannelSet::stereo (), true))
     {
     }
 
@@ -173,8 +171,7 @@ TEST_CASE ("transport/clock: starts stopped at PPQ 0 with the default tempo", "[
     REQUIRE (transport.bpm () == Transport::defaultBpm);
     REQUIRE (transport.blockStartTimeInSamples () == 0);
     REQUIRE (transport.blockStartTimeInSeconds () == 0.0);
-    REQUIRE (transport.ppqPerSample ()
-             == Transport::defaultBpm / (60.0 * testSampleRate));
+    REQUIRE (transport.ppqPerSample () == Transport::defaultBpm / (60.0 * testSampleRate));
 }
 
 TEST_CASE ("transport/clock: a stopped transport does not advance", "[unit]")
@@ -206,13 +203,11 @@ TEST_CASE ("transport/clock: PPQ is exact and free of accumulation drift", "[uni
 
     // The transport has now latched the start of block (blocks + 1).
     const auto elapsedSamples = static_cast<std::int64_t> (blocks) * testBlockSize;
-    const double expected =
-        static_cast<double> (elapsedSamples) * transport.ppqPerSample ();
+    const double expected = static_cast<double> (elapsedSamples) * transport.ppqPerSample ();
 
     REQUIRE (transport.blockStartTimeInSamples () == elapsedSamples);
     REQUIRE (transport.blockStartPpq () == expected);
-    REQUIRE (transport.blockStartTimeInSeconds ()
-             == static_cast<double> (elapsedSamples) / testSampleRate);
+    REQUIRE (transport.blockStartTimeInSeconds () == static_cast<double> (elapsedSamples) / testSampleRate);
 }
 
 TEST_CASE ("transport/clock: PPQ at a given sample is buffer-size independent", "[determinism]")
@@ -308,14 +303,12 @@ TEST_CASE ("transport/tempo: clamped to 20..300 and non-finite values rejected",
     // Non-finite payloads must be DROPPED, keeping the current tempo (issue #3
     // posture). A NaN reaching ppqPerSample would poison every later PPQ value.
     applyThenBlock (transport,
-                    cmdDouble (EngineCommandType::setTempoBpm,
-                               std::numeric_limits<double>::quiet_NaN ()),
+                    cmdDouble (EngineCommandType::setTempoBpm, std::numeric_limits<double>::quiet_NaN ()),
                     testBlockSize);
     REQUIRE (transport.bpm () == 140.0);
 
     applyThenBlock (transport,
-                    cmdDouble (EngineCommandType::setTempoBpm,
-                               std::numeric_limits<double>::infinity ()),
+                    cmdDouble (EngineCommandType::setTempoBpm, std::numeric_limits<double>::infinity ()),
                     testBlockSize);
     REQUIRE (transport.bpm () == 140.0);
     REQUIRE (std::isfinite (transport.blockStartPpq ()));
@@ -334,15 +327,13 @@ TEST_CASE ("transport/tempo: a tempo change lands exactly on a block boundary", 
     runBlocks (transport, firstLeg, testBlockSize);
 
     const double rate120 = transport.ppqPerSample ();
-    REQUIRE (transport.blockStartPpq ()
-             == static_cast<double> (firstLeg * testBlockSize) * rate120);
+    REQUIRE (transport.blockStartPpq () == static_cast<double> (firstLeg * testBlockSize) * rate120);
 
     // The next command drained will be consumed at the head of the NEXT block, whose
     // start is exactly this block's exclusive end. That is the boundary the tempo
     // change lands on.
     const double ppqAtChange = transport.blockEndPpq ();
-    const std::int64_t changeSample =
-        static_cast<std::int64_t> (firstLeg + 1) * testBlockSize;
+    const std::int64_t changeSample = static_cast<std::int64_t> (firstLeg + 1) * testBlockSize;
     REQUIRE (ppqAtChange == static_cast<double> (changeSample) * rate120);
 
     // Tempo doubles at that block boundary.
@@ -356,16 +347,14 @@ TEST_CASE ("transport/tempo: a tempo change lands exactly on a block boundary", 
     // moves the RATE, never the position) and spans one block at the NEW rate.
     REQUIRE (transport.blockStartTimeInSamples () == changeSample);
     REQUIRE (transport.blockStartPpq () == ppqAtChange);
-    REQUIRE (transport.blockEndPpq ()
-             == ppqAtChange + static_cast<double> (testBlockSize) * rate240);
+    REQUIRE (transport.blockEndPpq () == ppqAtChange + static_cast<double> (testBlockSize) * rate240);
 
     constexpr int secondLeg = 10;
     runBlocks (transport, secondLeg, testBlockSize);
 
     // Position = old leg at the old rate + new leg at the new rate. Exact: one
     // re-anchor per tempo change, no accumulation.
-    REQUIRE (transport.blockStartPpq ()
-             == ppqAtChange + static_cast<double> (secondLeg * testBlockSize) * rate240);
+    REQUIRE (transport.blockStartPpq () == ppqAtChange + static_cast<double> (secondLeg * testBlockSize) * rate240);
 }
 
 TEST_CASE ("transport/tempo: several tempo commands in one block cost no extra error", "[unit]")
@@ -455,8 +444,7 @@ TEST_CASE ("transport/stop: play after stop restarts from the top", "[unit]")
     REQUIRE (transport.blockStartPpq () == 0.0);
 
     transport.beginBlock (testBlockSize);
-    REQUIRE (transport.blockStartPpq ()
-             == static_cast<double> (testBlockSize) * transport.ppqPerSample ());
+    REQUIRE (transport.blockStartPpq () == static_cast<double> (testBlockSize) * transport.ppqPerSample ());
 }
 
 TEST_CASE ("transport/locate: repositions exactly and rejects invalid targets", "[unit]")
@@ -467,13 +455,11 @@ TEST_CASE ("transport/locate: repositions exactly and rejects invalid targets", 
     applyThenBlock (transport, cmdDouble (EngineCommandType::transportLocate, 8.0), testBlockSize);
     REQUIRE (transport.blockStartPpq () == 8.0); // exact — the anchor IS the target
     REQUIRE (transport.positionJumpedThisBlock ());
-    REQUIRE (transport.blockStartTimeInSamples ()
-             == std::llround (8.0 / transport.ppqPerSample ()));
+    REQUIRE (transport.blockStartTimeInSamples () == std::llround (8.0 / transport.ppqPerSample ()));
 
     // Invalid targets are dropped and leave the playhead alone.
-    for (const double bad : { -1.0,
-                              std::numeric_limits<double>::quiet_NaN (),
-                              -std::numeric_limits<double>::infinity () })
+    for (const double bad :
+         { -1.0, std::numeric_limits<double>::quiet_NaN (), -std::numeric_limits<double>::infinity () })
     {
         applyThenBlock (transport, cmdDouble (EngineCommandType::transportLocate, bad), testBlockSize);
         REQUIRE (transport.blockStartPpq () == 8.0);
@@ -491,8 +477,8 @@ TEST_CASE ("transport/locate: playing on from a located position stays exact", "
     constexpr int blocks = 64;
     runBlocks (transport, blocks, testBlockSize);
 
-    REQUIRE (transport.blockStartPpq ()
-             == 16.0 + static_cast<double> (blocks * testBlockSize) * transport.ppqPerSample ());
+    REQUIRE (transport.blockStartPpq () ==
+             16.0 + static_cast<double> (blocks * testBlockSize) * transport.ppqPerSample ());
 }
 
 TEST_CASE ("transport/clock: a sample-rate change preserves the musical position", "[unit]")
@@ -656,7 +642,8 @@ TEST_CASE ("graph/transport: master commands still apply after the drain migrati
     hotGain.value.f = 40.0f;
     REQUIRE (graph.commands ().push (hotGain));
 
-    const auto settle = [&] {
+    const auto settle = [&]
+    {
         for (int i = 0; i < 80; ++i)
         {
             buffer.clear ();
@@ -760,8 +747,7 @@ TEST_CASE ("graph/transport: transport churn allocates nothing in steady state",
         {
             // Every block: a tempo change, and periodically a stop/play/locate cycle
             // so the rewind + edge-latching paths are inside the measured region.
-            graph.commands ().push (cmdDouble (EngineCommandType::setTempoBpm,
-                                               100.0 + static_cast<double> (i % 50)));
+            graph.commands ().push (cmdDouble (EngineCommandType::setTempoBpm, 100.0 + static_cast<double> (i % 50)));
             if (i % 37 == 0)
             {
                 graph.commands ().push (cmd (EngineCommandType::transportStop));

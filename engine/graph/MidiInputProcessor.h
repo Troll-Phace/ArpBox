@@ -59,9 +59,8 @@ public:
     /** Sets the non-owning pointers the audio thread reads each block: the
         `NoteEventQueue` (QWERTY/pads), the `MidiMessageCollector` (hardware MIDI),
         and the `MidiInputControl` (channel mask / voice count / flush). */
-    void setSharedState (NoteEventQueue* notes,
-                         juce::MidiMessageCollector* collector,
-                         MidiInputControl* control) noexcept;
+    void
+    setSharedState (NoteEventQueue* notes, juce::MidiMessageCollector* collector, MidiInputControl* control) noexcept;
 
     // ── AudioProcessor overrides ─────────────────────────────────────────────
 
@@ -127,9 +126,9 @@ private:
     static bool channelPasses (std::uint16_t mask, int channel) noexcept;
 
     // Injected, non-owning (graph-owned) shared state.
-    NoteEventQueue* noteQueue = nullptr;        ///< QWERTY/pad producer channel (SPSC consumer here).
+    NoteEventQueue* noteQueue = nullptr;             ///< QWERTY/pad producer channel (SPSC consumer here).
     juce::MidiMessageCollector* collector = nullptr; ///< Hardware MIDI, fed off the MIDI thread.
-    MidiInputControl* control = nullptr;        ///< Channel mask / voice count / flush.
+    MidiInputControl* control = nullptr;             ///< Channel mask / voice count / flush.
 
     // Pre-sized in prepareToPlay so removeNextBlockOfMessages + iteration never
     // allocate on the audio thread.

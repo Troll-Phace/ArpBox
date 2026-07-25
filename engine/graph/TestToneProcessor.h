@@ -97,7 +97,7 @@ private:
 
     ToneControl* toneControl = nullptr; ///< Non-owning; graph owns the object.
     double currentSampleRate = 44100.0; ///< Cached in prepareToPlay.
-    double phase = 0.0;                  ///< Phasor accumulator in radians [0, 2π).
+    double phase = 0.0;                 ///< Phasor accumulator in radians [0, 2π).
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TestToneProcessor)
 };

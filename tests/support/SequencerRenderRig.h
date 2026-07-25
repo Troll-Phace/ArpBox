@@ -60,8 +60,7 @@ inline double samplesPerScaffoldStep (double bpm, double sampleRate) noexcept
     the step, rounded, minimum one sample). */
 inline std::int64_t scaffoldGateSamples (double bpm, double sampleRate) noexcept
 {
-    const double length = engine::SequencerProcessor::scaffoldGateFraction
-                        * samplesPerScaffoldStep (bpm, sampleRate);
+    const double length = engine::SequencerProcessor::scaffoldGateFraction * samplesPerScaffoldStep (bpm, sampleRate);
     const auto rounded = static_cast<std::int64_t> (std::llround (length));
     return rounded < 1 ? 1 : rounded;
 }
@@ -102,14 +101,13 @@ inline engine::EngineCommand engineCommand (engine::EngineCommandType type, doub
 /** A command to apply at the head of the block containing `atSample`. */
 struct ScheduledCommand
 {
-    std::int64_t atSample = 0;      ///< Absolute sample the command should land on.
-    engine::EngineCommand command;  ///< What to apply.
+    std::int64_t atSample = 0;     ///< Absolute sample the command should land on.
+    engine::EngineCommand command; ///< What to apply.
 };
 
 /** True when every scheduled command sits exactly on a `blockSize` boundary — the
     precondition for comparing renders across block sizes (see the header note). */
-inline bool scheduleIsBlockAligned (const std::vector<ScheduledCommand>& schedule,
-                                   int blockSize) noexcept
+inline bool scheduleIsBlockAligned (const std::vector<ScheduledCommand>& schedule, int blockSize) noexcept
 {
     if (blockSize <= 0)
         return false;
@@ -148,8 +146,8 @@ struct SequencerRig
         sequencer.processBlock (audio, midi);
     }
 
-    engine::Transport transport;            ///< The musical clock (drive it as the head node would).
-    engine::SequencerProcessor sequencer;   ///< The node under test.
+    engine::Transport transport;          ///< The musical clock (drive it as the head node would).
+    engine::SequencerProcessor sequencer; ///< The node under test.
 };
 
 /** Renders `config.numBlocks` blocks of `rig`, applying each scheduled command at the
@@ -160,22 +158,21 @@ struct SequencerRig
     The rig is NOT reset: successive calls continue the same musical timeline (only
     the returned result's sample origin restarts at 0), which is how the flush tests
     render "up to a note sounding" and then "the block with the stop in it". */
-inline MidiRenderResult renderSequencer (SequencerRig& rig,
-                                         const MidiRenderConfig& config,
-                                         const std::vector<ScheduledCommand>& schedule = {})
+inline MidiRenderResult
+renderSequencer (SequencerRig& rig, const MidiRenderConfig& config, const std::vector<ScheduledCommand>& schedule = {})
 {
-    return renderProcessor (
-        rig.sequencer,
-        config,
-        [&] (const RenderBlockContext& context)
-        {
-            const std::int64_t blockEnd = context.blockBase + static_cast<std::int64_t> (context.numSamples);
+    return renderProcessor (rig.sequencer,
+                            config,
+                            [&] (const RenderBlockContext& context)
+                            {
+                                const std::int64_t blockEnd =
+                                    context.blockBase + static_cast<std::int64_t> (context.numSamples);
 
-            for (const auto& entry : schedule)
-                if (entry.atSample >= context.blockBase && entry.atSample < blockEnd)
-                    rig.transport.applyCommand (entry.command);
+                                for (const auto& entry : schedule)
+                                    if (entry.atSample >= context.blockBase && entry.atSample < blockEnd)
+                                        rig.transport.applyCommand (entry.command);
 
-            rig.transport.beginBlock (context.numSamples);
-        });
+                                rig.transport.beginBlock (context.numSamples);
+                            });
 }
 } // namespace arpbox::testing

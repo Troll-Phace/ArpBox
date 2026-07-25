@@ -102,9 +102,7 @@ constexpr SweepConfig configFractionalGrid { 44100.0, 137.0, 614400 };
 /** Renders one block size of a config, with an optional command schedule. The rig is
     constructed fresh per call, so each render starts from a pristine transport at
     PPQ 0 with an empty sounding-note table. */
-MidiRenderResult renderSweep (const SweepConfig& sweep,
-                              int blockSize,
-                              const std::vector<ScheduledCommand>& schedule)
+MidiRenderResult renderSweep (const SweepConfig& sweep, int blockSize, const std::vector<ScheduledCommand>& schedule)
 {
     SequencerRig rig { sweep.sampleRate, blockSize };
 
@@ -170,8 +168,7 @@ TEST_CASE ("sequencer/timing: an exact-integer step grid renders byte-identicall
     // The grid really is an exact integer number of samples — the property that makes
     // this config the discriminating one for the sample-offset snap.
     REQUIRE (samplesPerScaffoldStep (configExactGrid.bpm, configExactGrid.sampleRate) == exactStepSamples);
-    const std::int64_t gateSamples =
-        scaffoldGateSamples (configExactGrid.bpm, configExactGrid.sampleRate);
+    const std::int64_t gateSamples = scaffoldGateSamples (configExactGrid.bpm, configExactGrid.sampleRate);
     REQUIRE (gateSamples == 6000); // 50% of 12000
 
     MidiRenderResult reference;
@@ -282,8 +279,7 @@ TEST_CASE ("sequencer/timing: a fractional step grid renders byte-identically at
                                                      configFractionalGrid.sampleRate);
     REQUIRE (expectedSteps == 128);
 
-    const double stepSamples =
-        samplesPerScaffoldStep (configFractionalGrid.bpm, configFractionalGrid.sampleRate);
+    const double stepSamples = samplesPerScaffoldStep (configFractionalGrid.bpm, configFractionalGrid.sampleRate);
     REQUIRE (stepSamples > 4828.0);
     REQUIRE (stepSamples < 4829.0); // deliberately NOT an integer
 
@@ -347,8 +343,7 @@ TEST_CASE ("sequencer/timing: a fractional step grid renders byte-identically at
 // 5.3c — the sweep, through a tempo change
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE ("sequencer/timing: a mid-render tempo change stays buffer-size independent",
-           "[midi-conformance]")
+TEST_CASE ("sequencer/timing: a mid-render tempo change stays buffer-size independent", "[midi-conformance]")
 {
     // A tempo change makes the transport RE-ANCHOR its tempo segment (Transport.h), so
     // the step grid after the change is derived from a fresh (anchorSample, anchorPpq)
@@ -360,8 +355,7 @@ TEST_CASE ("sequencer/timing: a mid-render tempo change stays buffer-size indepe
     // At 60 BPM that sample is PPQ 0.64, deliberately NOT on a step boundary: the
     // change has to be handled mid-step, not at a convenient grid point.
     auto schedule = startPlaying (configExactGrid); // 60 BPM from sample 0
-    schedule.push_back (
-        ScheduledCommand { blockAlignmentUnit, engineCommand (EngineCommandType::setTempoBpm, 175.0) });
+    schedule.push_back (ScheduledCommand { blockAlignmentUnit, engineCommand (EngineCommandType::setTempoBpm, 175.0) });
 
     MidiRenderResult reference;
     std::vector<std::uint8_t> referenceBytes;
@@ -414,8 +408,7 @@ TEST_CASE ("sequencer/timing: a mid-render tempo change stays buffer-size indepe
 // 5.3c — no step is duplicated or skipped at a block edge (the step-index snap)
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE ("sequencer/timing: no step is duplicated or skipped at a block edge",
-           "[midi-conformance]")
+TEST_CASE ("sequencer/timing: no step is duplicated or skipped at a block edge", "[midi-conformance]")
 {
     // THE GUARD FOR `stepIndexSnapSteps` specifically, and it needs a different shape
     // from the sweeps above. Snap #1 protects the seam between consecutive blocks:
@@ -437,8 +430,7 @@ TEST_CASE ("sequencer/timing: no step is duplicated or skipped at a block edge",
     // cycle jumps) with no dependence on floating-point endpoint rounding — which a
     // total-count comparison would have, since `ceil()` of a value an ulp below an
     // integer is a legitimate off-by-one for a CORRECT engine.
-    constexpr int cyclePitches[16] = { 60, 62, 64, 65, 67, 69, 71, 72,
-                                       60, 62, 64, 65, 67, 69, 71, 72 };
+    constexpr int cyclePitches[16] = { 60, 62, 64, 65, 67, 69, 71, 72, 60, 62, 64, 65, 67, 69, 71, 72 };
     constexpr std::int64_t spanSamples = 61440; // 2 x the alignment unit
 
     int sequenceBreaks = 0;
@@ -520,10 +512,9 @@ TEST_CASE ("sequencer/timing: no step is duplicated or skipped at a block edge",
         }
     }
 
-    INFO ("swept " << combinations << " (tempo, sample rate, block size) combinations, "
-                   << totalSteps << " steps");
-    INFO ("first offending combination: " << firstBadBpm << " BPM @ " << firstBadSampleRate
-                                          << " Hz, block " << firstBadBlockSize);
+    INFO ("swept " << combinations << " (tempo, sample rate, block size) combinations, " << totalSteps << " steps");
+    INFO ("first offending combination: " << firstBadBpm << " BPM @ " << firstBadSampleRate << " Hz, block "
+                                          << firstBadBlockSize);
 
     REQUIRE (sequenceBreaks == 0);
     REQUIRE (coincidentSteps == 0);
@@ -535,8 +526,7 @@ TEST_CASE ("sequencer/timing: no step is duplicated or skipped at a block edge",
 // 5.3c — no event may leave its own block
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE ("sequencer/timing: every emitted event lands inside its own block",
-           "[midi-conformance]")
+TEST_CASE ("sequencer/timing: every emitted event lands inside its own block", "[midi-conformance]")
 {
     // `juce::MidiBuffer::addEvent` does NOT validate the sample offset, and a step
     // boundary landing on a block edge is exactly where an off-by-one would put an

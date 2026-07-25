@@ -48,7 +48,11 @@ namespace
 class FakeSynthEngine final : public arpbox::app::ISynthEngine
 {
 public:
-    FakeSynthEngine (double sr, int block) : sampleRate (sr), blockSize (block) {}
+    FakeSynthEngine (double sr, int block)
+        : sampleRate (sr)
+        , blockSize (block)
+    {
+    }
 
     // MESSAGE-THREAD ONLY.
     void setSynth (std::unique_ptr<juce::AudioProcessor> synth) override
@@ -91,7 +95,8 @@ private:
 // destruction (the held HostedPluginNode must free while JUCE is alive).
 struct SlotFixture
 {
-    explicit SlotFixture (double sr = 48000.0, int block = 128) : engine (sr, block)
+    explicit SlotFixture (double sr = 48000.0, int block = 128)
+        : engine (sr, block)
     {
         auto fmt = std::make_unique<FakePluginFormat> ();
         format = fmt.get ();
@@ -210,7 +215,7 @@ TEST_CASE ("synthslot/load: a superseding load drops the stale result and keeps 
     SlotFixture fx;
     arpbox::app::SynthSlot slot (fx.engine, fx.formats);
 
-    slot.load (descFor (FakeBehavior::baseline));       // A
+    slot.load (descFor (FakeBehavior::baseline));        // A
     slot.load (descFor (FakeBehavior::stateCorrupting)); // B supersedes A before either lands
 
     // Settle: !isPending is reached only once BOTH callbacks have been processed
@@ -223,7 +228,7 @@ TEST_CASE ("synthslot/load: a superseding load drops the stale result and keeps 
     REQUIRE (slot.isLoaded ());
     REQUIRE (slot.getCurrentSynthName () == nameOf (FakeBehavior::stateCorrupting)); // B is live
     REQUIRE (fx.engine.currentName () == nameOf (FakeBehavior::stateCorrupting));
-    REQUIRE (fx.engine.setSynthCount () == 1);  // only B reached the engine; A never did
+    REQUIRE (fx.engine.setSynthCount () == 1); // only B reached the engine; A never did
     REQUIRE (fx.engine.removeSynthCount () == 0);
     REQUIRE (slot.getLastError ().isEmpty ());
 }
@@ -320,7 +325,7 @@ TEST_CASE ("synthslot/swap: fade-out wait is bounded when audio is stopped (#24)
 
     REQUIRE (polls == kFadeOutBudget); // bounded — never hangs (#24)
     REQUIRE_FALSE (slot.isPending ());
-    REQUIRE (fx.engine.setSynthCount () == 2);            // B inserted on the budget poll
+    REQUIRE (fx.engine.setSynthCount () == 2); // B inserted on the budget poll
     REQUIRE (fx.engine.currentNode () != nodeA);
     REQUIRE (slot.getCurrentSynthName () == nameOf (FakeBehavior::stateCorrupting));
     REQUIRE (slot.isLoaded ());
@@ -346,7 +351,7 @@ TEST_CASE ("synthslot/remove: fade-out wait is bounded when audio is stopped (#2
     constexpr int kHardCap = 500;
     while (slot.isPending () && polls < kHardCap)
     {
-        REQUIRE (slot.isLoaded ());                     // still present until the budget fires
+        REQUIRE (slot.isLoaded ()); // still present until the budget fires
         REQUIRE (fx.engine.removeSynthCount () == 0);
         slot.poll ();
         ++polls;
@@ -378,10 +383,10 @@ TEST_CASE ("synthslot/load: an instantiation failure is isolated and keeps the c
     slot.load (badDescription ());
     REQUIRE (pumpUntilPred ([&] { return ! slot.isPending (); }));
 
-    REQUIRE (slot.getLastError ().isNotEmpty ());          // typed failure surfaced
-    REQUIRE (slot.isLoaded ());                            // good synth untouched
+    REQUIRE (slot.getLastError ().isNotEmpty ()); // typed failure surfaced
+    REQUIRE (slot.isLoaded ());                   // good synth untouched
     REQUIRE (fx.engine.currentNode () == good);
     REQUIRE (slot.getCurrentSynthName () == nameOf (FakeBehavior::baseline));
-    REQUIRE (fx.engine.setSynthCount () == 1);             // no second insert
+    REQUIRE (fx.engine.setSynthCount () == 1); // no second insert
     REQUIRE (fx.engine.removeSynthCount () == 0);
 }

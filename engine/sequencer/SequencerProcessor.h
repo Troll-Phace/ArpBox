@@ -219,10 +219,10 @@ private:
         contract to grow into it. */
     struct StepEmission
     {
-        bool gate = false;                    ///< False ⇒ this step emits nothing.
-        int channel = scaffoldChannel;        ///< MIDI channel, 1..16.
-        int note = scaffoldRootNote;          ///< MIDI note number, 0..127.
-        int velocity = scaffoldVelocity;      ///< 1..127.
+        bool gate = false;                                ///< False ⇒ this step emits nothing.
+        int channel = scaffoldChannel;                    ///< MIDI channel, 1..16.
+        int note = scaffoldRootNote;                      ///< MIDI note number, 0..127.
+        int velocity = scaffoldVelocity;                  ///< 1..127.
         double gateFractionOfStep = scaffoldGateFraction; ///< LEN, as a fraction of one step.
     };
 

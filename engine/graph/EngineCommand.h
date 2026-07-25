@@ -29,10 +29,10 @@ enum class EngineCommandType : std::uint8_t
     setTestToneEnabled,   ///< value.i = 0/1 (debug passthrough test tone).
     setTestToneFrequency, ///< value.f = tone frequency in Hz.
     // ── Phase 5.1 transport (consumed by `Transport`, an ICommandSink) ────────
-    transportPlay,        ///< no payload — start the transport.
-    transportStop,        ///< no payload — stop AND rewind to PPQ 0 (§5.5 flush point).
-    transportLocate,      ///< value.d = target PPQ (must be finite and >= 0).
-    setTempoBpm,          ///< value.d = target tempo in BPM (clamped to 20..300).
+    transportPlay,   ///< no payload — start the transport.
+    transportStop,   ///< no payload — stop AND rewind to PPQ 0 (§5.5 flush point).
+    transportLocate, ///< value.d = target PPQ (must be finite and >= 0).
+    setTempoBpm,     ///< value.d = target tempo in BPM (clamped to 20..300).
     // Later phases: pattern-switch queue, seed/DICE, commit/uncommit — appended as
     // new enumerators above this line.
 };
@@ -67,8 +67,8 @@ struct EngineCommand
         float f;
         std::int32_t i;
         std::uint32_t u;
-        double d;           ///< Tempo (BPM) / locate target (PPQ) — needs full precision.
-        std::uint64_t u64;  ///< 64-bit RNG seeds (Phase 12).
+        double d;          ///< Tempo (BPM) / locate target (PPQ) — needs full precision.
+        std::uint64_t u64; ///< 64-bit RNG seeds (Phase 12).
     } value {};
 };
 

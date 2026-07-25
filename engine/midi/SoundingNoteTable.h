@@ -112,9 +112,7 @@ public:
 
         A note whose due sample already passed (possible only after a discontinuity
         the caller failed to flush) is emitted at offset 0 rather than dropped. */
-    void emitDueNoteOffs (juce::MidiBuffer& midi,
-                          std::int64_t blockStartSample,
-                          int numSamples) noexcept;
+    void emitDueNoteOffs (juce::MidiBuffer& midi, std::int64_t blockStartSample, int numSamples) noexcept;
 
     // RT-SAFE: audio thread.
     /** Emits note-offs for ALL sounding notes at `offset`, then a CC123
@@ -159,9 +157,7 @@ private:
 
     // RT-SAFE: emits a 3-byte note-off from raw bytes (never constructs a
     // juce::MidiMessage — that could heap-allocate on the audio thread).
-    static void emitNoteOff (juce::MidiBuffer& midi,
-                             const Entry& entry,
-                             int offset) noexcept;
+    static void emitNoteOff (juce::MidiBuffer& midi, const Entry& entry, int offset) noexcept;
 
     // RT-SAFE: removes entry `index` by swapping the last entry into its slot. Order
     // is not preserved — juce::MidiBuffer sorts on insertion, so emission order does

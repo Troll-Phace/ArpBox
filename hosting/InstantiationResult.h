@@ -35,8 +35,8 @@ struct InstantiationResult
     };
 
     Status status { Status::creationFailed };
-    juce::String message;                                 ///< Empty on success; error text otherwise.
-    std::unique_ptr<juce::AudioPluginInstance> instance;  ///< Non-null iff status == ok.
+    juce::String message;                                ///< Empty on success; error text otherwise.
+    std::unique_ptr<juce::AudioPluginInstance> instance; ///< Non-null iff status == ok.
 
     /** True when a prepared instance is present and ready for the caller to adopt. */
     bool ok () const noexcept { return status == Status::ok && instance != nullptr; }

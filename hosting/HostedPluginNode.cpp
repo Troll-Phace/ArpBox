@@ -10,8 +10,8 @@ using namespace juce;
 
 namespace
 {
-// A gain below this (and not smoothing) counts as "silent" for the swap handshake.
-constexpr float kSilenceEpsilon = 1.0e-6f;
+    // A gain below this (and not smoothing) counts as "silent" for the swap handshake.
+    constexpr float kSilenceEpsilon = 1.0e-6f;
 } // namespace
 
 //==============================================================================
@@ -123,10 +123,8 @@ void HostedPluginNode::negotiateBusLayout ()
     // previous if/else-if ladder (each branch bodied `ok = true`) while avoiding
     // the bugprone-branch-clone repeated-body diagnostic. The third clause keeps
     // whatever layout the plugin already has, if that is valid.
-    const bool ok = trySetOutput (AudioChannelSet::stereo ())
-                 || trySetOutput (AudioChannelSet::mono ())
-                 || inner->checkBusesLayoutSupported (inner->getBusesLayout ())
-                 || inner->enableAllBuses ();
+    const bool ok = trySetOutput (AudioChannelSet::stereo ()) || trySetOutput (AudioChannelSet::mono ()) ||
+                    inner->checkBusesLayoutSupported (inner->getBusesLayout ()) || inner->enableAllBuses ();
 
     if (! ok)
     {
@@ -157,8 +155,8 @@ void HostedPluginNode::prepareToPlay (double sampleRate, int maximumExpectedSamp
     // (§6.2 adopts the already-prepared instance). Always (re)arm smoothers/scratch.
     if (inner != nullptr)
     {
-        const bool changed = ! juce::exactlyEqual (sampleRate, lastPreparedSampleRate)
-                          || (maximumExpectedSamplesPerBlock != lastPreparedBlockSize);
+        const bool changed = ! juce::exactlyEqual (sampleRate, lastPreparedSampleRate) ||
+                             (maximumExpectedSamplesPerBlock != lastPreparedBlockSize);
 
         if (changed)
         {
@@ -187,8 +185,7 @@ void HostedPluginNode::prepareToPlay (double sampleRate, int maximumExpectedSamp
     inputTrim.reset (sampleRate, kTrimSeconds);
     outputTrim.reset (sampleRate, kTrimSeconds);
 
-    const bool silent = bypassed.load (std::memory_order_relaxed)
-                     || fadedOut.load (std::memory_order_relaxed);
+    const bool silent = bypassed.load (std::memory_order_relaxed) || fadedOut.load (std::memory_order_relaxed);
     fadeGain.setCurrentAndTargetValue (silent ? 0.0f : 1.0f);
     inputTrim.setCurrentAndTargetValue (inputGainTarget.load (std::memory_order_relaxed));
     outputTrim.setCurrentAndTargetValue (outputGainTarget.load (std::memory_order_relaxed));
@@ -283,16 +280,13 @@ void HostedPluginNode::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     // Soft-bypass crossfade + swap fade share one ramp: silent when bypassed OR
     // faded out. This is the click-free swap ramp the coordinator drives.
-    const bool wantSilent = bypassed.load (std::memory_order_relaxed)
-                         || fadedOut.load (std::memory_order_relaxed);
+    const bool wantSilent = bypassed.load (std::memory_order_relaxed) || fadedOut.load (std::memory_order_relaxed);
     fadeGain.setTargetValue (wantSilent ? 0.0f : 1.0f);
     fadeGain.applyGain (buffer, numSamples);
 
     // Swap handshake: the node is "fade-out complete" once the ramp has reached 0
     // and stopped moving — i.e. the output is genuinely silent.
-    const bool silentNow = wantSilent
-                        && ! fadeGain.isSmoothing ()
-                        && (fadeGain.getCurrentValue () <= kSilenceEpsilon);
+    const bool silentNow = wantSilent && ! fadeGain.isSmoothing () && (fadeGain.getCurrentValue () <= kSilenceEpsilon);
     fadeOutComplete.store (silentNow, std::memory_order_release);
 
     // Output NaN/Inf scrub — UNCONDITIONAL (issue #3 mitigation). Runs on the

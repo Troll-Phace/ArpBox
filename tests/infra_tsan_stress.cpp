@@ -25,8 +25,7 @@ using arpbox::engine::EngineSnapshot;
 using arpbox::engine::EngineSnapshotBuffer;
 using arpbox::engine::SpscFifo;
 
-TEST_CASE ("infra/spsc-fifo: concurrent producer/consumer reconciles and stays ordered",
-           "[unit]")
+TEST_CASE ("infra/spsc-fifo: concurrent producer/consumer reconciles and stays ordered", "[unit]")
 {
     // One producer pushes a long, deterministic, monotonically increasing stream;
     // one consumer drains concurrently. SPSC guarantees the consumed values are a
@@ -41,45 +40,52 @@ TEST_CASE ("infra/spsc-fifo: concurrent producer/consumer reconciles and stays o
     std::atomic<std::uint64_t> consumedCount { 0 };
     std::atomic<bool> orderOk { true };
 
-    std::thread consumer ([&] {
-        while (! go.load (std::memory_order_acquire))
+    std::thread consumer (
+        [&]
         {
-        } // spin until start (no sleep)
+            while (! go.load (std::memory_order_acquire))
+            {
+            } // spin until start (no sleep)
 
-        std::uint64_t localConsumed = 0;
-        bool first = true;
-        std::uint32_t prev = 0;
-        bool ok = true;
+            std::uint64_t localConsumed = 0;
+            bool first = true;
+            std::uint32_t prev = 0;
+            bool ok = true;
 
-        const auto drainOnce = [&] {
-            fifo.drain ([&] (const std::uint32_t& v) noexcept {
-                if (! first && v <= prev)
-                    ok = false; // must be strictly increasing (in-order, no dupes)
-                prev = v;
-                first = false;
-                ++localConsumed;
-            });
-        };
+            const auto drainOnce = [&]
+            {
+                fifo.drain (
+                    [&] (const std::uint32_t& v) noexcept
+                    {
+                        if (! first && v <= prev)
+                            ok = false; // must be strictly increasing (in-order, no dupes)
+                        prev = v;
+                        first = false;
+                        ++localConsumed;
+                    });
+            };
 
-        // Drain until the producer is done AND the ring is empty.
-        while (! producerDone.load (std::memory_order_acquire))
-            drainOnce ();
-        drainOnce (); // final sweep of whatever remained after producerDone
+            // Drain until the producer is done AND the ring is empty.
+            while (! producerDone.load (std::memory_order_acquire))
+                drainOnce ();
+            drainOnce (); // final sweep of whatever remained after producerDone
 
-        consumedCount.store (localConsumed, std::memory_order_relaxed);
-        orderOk.store (ok, std::memory_order_relaxed);
-    });
+            consumedCount.store (localConsumed, std::memory_order_relaxed);
+            orderOk.store (ok, std::memory_order_relaxed);
+        });
 
-    std::thread producer ([&] {
-        while (! go.load (std::memory_order_acquire))
+    std::thread producer (
+        [&]
         {
-        }
+            while (! go.load (std::memory_order_acquire))
+            {
+            }
 
-        for (std::uint32_t i = 0; i < total; ++i)
-            fifo.push (i); // drops when full are counted by the fifo
+            for (std::uint32_t i = 0; i < total; ++i)
+                fifo.push (i); // drops when full are counted by the fifo
 
-        producerDone.store (true, std::memory_order_release);
-    });
+            producerDone.store (true, std::memory_order_release);
+        });
 
     go.store (true, std::memory_order_release);
     producer.join ();
@@ -99,8 +105,7 @@ TEST_CASE ("infra/spsc-fifo: concurrent producer/consumer reconciles and stays o
 // TSan confirms clean. Keep this test as the standing guard: if either exchange is
 // ever weakened back below acq_rel, this concurrent run reintroduces the race and
 // the tsan job fails here.
-TEST_CASE ("infra/snapshot-buffer: concurrent reader never observes a torn value",
-           "[unit]")
+TEST_CASE ("infra/snapshot-buffer: concurrent reader never observes a torn value", "[unit]")
 {
     // Writer commits a monotonically increasing blockCounter and sets peakL to a
     // deterministic function of it (peakL == 2 * blockCounter). A reader spins,
@@ -117,51 +122,56 @@ TEST_CASE ("infra/snapshot-buffer: concurrent reader never observes a torn value
     std::atomic<bool> readsOk { true };
     std::atomic<std::uint64_t> maxSeen { 0 };
 
-    std::thread reader ([&] {
-        while (! go.load (std::memory_order_acquire))
+    std::thread reader (
+        [&]
         {
-        }
+            while (! go.load (std::memory_order_acquire))
+            {
+            }
 
-        std::uint64_t last = 0;
-        bool ok = true;
+            std::uint64_t last = 0;
+            bool ok = true;
 
-        const auto checkOnce = [&] {
-            const EngineSnapshot& s = buffer.read ();
-            const std::uint64_t bc = s.blockCounter;
+            const auto checkOnce = [&]
+            {
+                const EngineSnapshot& s = buffer.read ();
+                const std::uint64_t bc = s.blockCounter;
 
-            if (bc < last)
-                ok = false; // decreased → torn/garbage adoption
-            if (bc > total)
-                ok = false; // impossible value → tearing
-            if (s.peakL != static_cast<float> (bc) * 2.0f)
-                ok = false; // cross-field inconsistency → torn read
+                if (bc < last)
+                    ok = false; // decreased → torn/garbage adoption
+                if (bc > total)
+                    ok = false; // impossible value → tearing
+                if (s.peakL != static_cast<float> (bc) * 2.0f)
+                    ok = false; // cross-field inconsistency → torn read
 
-            last = bc;
-        };
+                last = bc;
+            };
 
-        while (! writerDone.load (std::memory_order_acquire))
-            checkOnce ();
-        checkOnce (); // one more after the writer stops
+            while (! writerDone.load (std::memory_order_acquire))
+                checkOnce ();
+            checkOnce (); // one more after the writer stops
 
-        maxSeen.store (last, std::memory_order_relaxed);
-        readsOk.store (ok, std::memory_order_relaxed);
-    });
+            maxSeen.store (last, std::memory_order_relaxed);
+            readsOk.store (ok, std::memory_order_relaxed);
+        });
 
-    std::thread writer ([&] {
-        while (! go.load (std::memory_order_acquire))
+    std::thread writer (
+        [&]
         {
-        }
+            while (! go.load (std::memory_order_acquire))
+            {
+            }
 
-        for (std::uint64_t i = 1; i <= total; ++i)
-        {
-            EngineSnapshot& w = buffer.beginWrite ();
-            w.blockCounter = i;
-            w.peakL = static_cast<float> (i) * 2.0f;
-            buffer.commit ();
-        }
+            for (std::uint64_t i = 1; i <= total; ++i)
+            {
+                EngineSnapshot& w = buffer.beginWrite ();
+                w.blockCounter = i;
+                w.peakL = static_cast<float> (i) * 2.0f;
+                buffer.commit ();
+            }
 
-        writerDone.store (true, std::memory_order_release);
-    });
+            writerDone.store (true, std::memory_order_release);
+        });
 
     go.store (true, std::memory_order_release);
     writer.join ();

@@ -198,16 +198,16 @@ private:
     EngineSnapshotBuffer snapshotBuffer;
     EngineEventQueue eventQueue;
     ToneControl toneControl;
-    NoteEventQueue noteQueue;             ///< QWERTY/pad channel; MIDI-In node consumes.
+    NoteEventQueue noteQueue;                 ///< QWERTY/pad channel; MIDI-In node consumes.
     juce::MidiMessageCollector midiCollector; ///< Hardware MIDI; fed off the MIDI thread, drained by the MIDI-In node.
-    MidiInputControl midiControl;         ///< MIDI-In channel mask / voice count / flush.
+    MidiInputControl midiControl;             ///< MIDI-In channel mask / voice count / flush.
 
     // Transport clock + the playhead wrapping it. Declared HERE (before `graph`) for
     // the same lifetime reason as the channels above: the transport node, the master
     // node, the SEQUENCER node and the graph's own playhead pointer all reference them
     // non-owningly, and must never outlive them.
-    Transport transport;                       ///< Audio-thread-owned musical clock.
-    TransportPlayHead playHead { transport };  ///< Installed on the graph in buildGraph().
+    Transport transport;                      ///< Audio-thread-owned musical clock.
+    TransportPlayHead playHead { transport }; ///< Installed on the graph in buildGraph().
 
     // The root graph owns the processor nodes.
     juce::AudioProcessorGraph graph;

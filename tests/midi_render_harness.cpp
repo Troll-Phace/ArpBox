@@ -57,9 +57,7 @@ class ScheduledMidiSource final : public juce::AudioProcessor
 {
 public:
     explicit ScheduledMidiSource (std::vector<std::int64_t> absoluteSamples)
-        : juce::AudioProcessor (BusesProperties ().withOutput ("Output",
-                                                              juce::AudioChannelSet::stereo (),
-                                                              true))
+        : juce::AudioProcessor (BusesProperties ().withOutput ("Output", juce::AudioChannelSet::stereo (), true))
         , schedule (std::move (absoluteSamples))
     {
     }
@@ -121,9 +119,7 @@ class MidiPassThrough final : public juce::AudioProcessor
 {
 public:
     MidiPassThrough ()
-        : juce::AudioProcessor (BusesProperties ().withOutput ("Output",
-                                                              juce::AudioChannelSet::stereo (),
-                                                              true))
+        : juce::AudioProcessor (BusesProperties ().withOutput ("Output", juce::AudioChannelSet::stereo (), true))
     {
     }
 
@@ -162,7 +158,7 @@ TEST_CASE ("harness/midi: events are collected at absolute sample positions", "[
     const auto result = renderProcessor (source, config);
     INFO (result.describe ());
 
-    REQUIRE (result.numBlocks == 64);          // 8192 / 128
+    REQUIRE (result.numBlocks == 64); // 8192 / 128
     REQUIRE (result.numSamples == 8192);
     REQUIRE (result.size () == kSchedule.size ());
     REQUIRE (result.isSampleSorted ());
@@ -181,8 +177,7 @@ TEST_CASE ("harness/midi: events are collected at absolute sample positions", "[
     REQUIRE (result[4].absoluteSample == 129);
 }
 
-TEST_CASE ("harness/midi: an absolute schedule renders byte-identically at every block size",
-           "[determinism]")
+TEST_CASE ("harness/midi: an absolute schedule renders byte-identically at every block size", "[determinism]")
 {
     // THE Phase 5.3 property, at the harness level: identical event sample positions
     // across 32…2048-sample blocks. Every later golden comparison leans on this being
@@ -209,7 +204,7 @@ TEST_CASE ("harness/midi: an absolute schedule renders byte-identically at every
         else
         {
             INFO ("block size " << blockSize << "\n" << reference.describeDifference (result));
-            REQUIRE (result == reference);                     // byte-for-byte events
+            REQUIRE (result == reference);                      // byte-for-byte events
             REQUIRE (result.toByteStream () == referenceBytes); // and canonical stream
         }
     }
@@ -251,8 +246,7 @@ TEST_CASE ("harness/midi: the canonical byte stream distinguishes different perf
     REQUIRE (a.describeDifference (a).contains ("BYTE-IDENTICAL"));
 }
 
-TEST_CASE ("harness/midi: a shorter stream that is a prefix of a longer one differs at the end",
-           "[determinism]")
+TEST_CASE ("harness/midi: a shorter stream that is a prefix of a longer one differs at the end", "[determinism]")
 {
     ScheduledMidiSource full { kSchedule };
     ScheduledMidiSource truncated { { 0, 1, 127 } };
@@ -307,17 +301,16 @@ TEST_CASE ("harness/midi: the block hook can inject input MIDI at a chosen block
 
     std::vector<std::int64_t> seenBases;
 
-    const auto result = renderProcessor (node,
-                                         config,
-                                         [&] (const arpbox::testing::RenderBlockContext& context)
-                                         {
-                                             seenBases.push_back (context.blockBase);
+    const auto result = renderProcessor (
+        node,
+        config,
+        [&] (const arpbox::testing::RenderBlockContext& context)
+        {
+            seenBases.push_back (context.blockBase);
 
-                                             if (context.blockIndex == 3)
-                                                 context.midi->addEvent (
-                                                     juce::MidiMessage::noteOn (1, 64, static_cast<juce::uint8> (99)),
-                                                     17);
-                                         });
+            if (context.blockIndex == 3)
+                context.midi->addEvent (juce::MidiMessage::noteOn (1, 64, static_cast<juce::uint8> (99)), 17);
+        });
 
     REQUIRE (seenBases.size () == 8u);
     for (int i = 0; i < 8; ++i)
@@ -333,8 +326,7 @@ TEST_CASE ("harness/midi: the block hook can inject input MIDI at a chosen block
 // Graph-internal tap
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE ("harness/graph: MidiCaptureNode records graph-internal MIDI at absolute positions",
-           "[hosting-lab]")
+TEST_CASE ("harness/graph: MidiCaptureNode records graph-internal MIDI at absolute positions", "[hosting-lab]")
 {
     // The second render idiom: MIDI generated INSIDE the graph (here by the MIDI-In
     // node draining the QWERTY/pad FIFO) never reaches the caller's MidiBuffer, so it

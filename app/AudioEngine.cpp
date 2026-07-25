@@ -51,9 +51,8 @@ AudioEngine::AudioEngine ()
 
     // 4. Reflect the opened device into the snapshot + cached readout.
     refreshDeviceDescription ();
-    setDeviceStatus (deviceManager.getCurrentAudioDevice () != nullptr
-                         ? engine::deviceStatusOk
-                         : engine::deviceStatusDead);
+    setDeviceStatus (deviceManager.getCurrentAudioDevice () != nullptr ? engine::deviceStatusOk
+                                                                       : engine::deviceStatusDead);
 }
 
 // MESSAGE-THREAD ONLY.
@@ -108,8 +107,7 @@ void AudioEngine::initialiseDevice ()
     }
     else
     {
-        error = deviceManager.initialiseWithDefaultDevices (kNumInputChannels,
-                                                            kNumOutputChannels);
+        error = deviceManager.initialiseWithDefaultDevices (kNumInputChannels, kNumOutputChannels);
     }
 
     // A non-empty error means even the default device could not be opened; the
@@ -168,9 +166,8 @@ void AudioEngine::refreshDeviceDescription ()
 {
     if (auto* device = deviceManager.getCurrentAudioDevice ())
     {
-        deviceDescription = device->getName ()
-                          + " — " + String (device->getCurrentSampleRate () / 1000.0, 1) + " kHz"
-                          + " / " + String (device->getCurrentBufferSizeSamples ()) + " smp";
+        deviceDescription = device->getName () + " — " + String (device->getCurrentSampleRate () / 1000.0, 1) + " kHz" +
+                            " / " + String (device->getCurrentBufferSizeSamples ()) + " smp";
     }
     else
     {
@@ -307,8 +304,7 @@ void AudioEngine::handleAsyncUpdate ()
 // prepare it ourselves.
 void AudioEngine::performFallback ()
 {
-    const auto error = deviceManager.initialiseWithDefaultDevices (kNumInputChannels,
-                                                                  kNumOutputChannels);
+    const auto error = deviceManager.initialiseWithDefaultDevices (kNumInputChannels, kNumOutputChannels);
     auto* device = deviceManager.getCurrentAudioDevice ();
 
     if (error.isEmpty () && device != nullptr && device->isOpen ())

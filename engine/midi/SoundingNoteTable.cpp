@@ -16,16 +16,12 @@ namespace
 } // namespace
 
 // RT-SAFE:
-void SoundingNoteTable::emitNoteOff (juce::MidiBuffer& midi,
-                                     const Entry& entry,
-                                     int offset) noexcept
+void SoundingNoteTable::emitNoteOff (juce::MidiBuffer& midi, const Entry& entry, int offset) noexcept
 {
     // Raw bytes, never juce::MidiMessage — constructing one can heap-allocate.
-    const juce::uint8 bytes[3] = {
-        static_cast<juce::uint8> (noteOffStatus | ((entry.channel - 1) & 0x0F)),
-        static_cast<juce::uint8> (entry.note & 0x7F),
-        noteOffVelocity
-    };
+    const juce::uint8 bytes[3] = { static_cast<juce::uint8> (noteOffStatus | ((entry.channel - 1) & 0x0F)),
+                                   static_cast<juce::uint8> (entry.note & 0x7F),
+                                   noteOffVelocity };
     midi.addEvent (bytes, 3, offset);
 }
 
@@ -35,8 +31,7 @@ void SoundingNoteTable::removeAt (int index) noexcept
     if (index < 0 || index >= count)
         return;
 
-    entries[static_cast<std::size_t> (index)] =
-        entries[static_cast<std::size_t> (count - 1)];
+    entries[static_cast<std::size_t> (index)] = entries[static_cast<std::size_t> (count - 1)];
     --count;
 }
 
@@ -87,15 +82,12 @@ void SoundingNoteTable::retireAt (int index, juce::MidiBuffer& midi, int offset)
 }
 
 // RT-SAFE:
-void SoundingNoteTable::emitDueNoteOffs (juce::MidiBuffer& midi,
-                                         std::int64_t blockStartSample,
-                                         int numSamples) noexcept
+void SoundingNoteTable::emitDueNoteOffs (juce::MidiBuffer& midi, std::int64_t blockStartSample, int numSamples) noexcept
 {
     if (numSamples <= 0)
         return;
 
-    const std::int64_t blockEndSample =
-        blockStartSample + static_cast<std::int64_t> (numSamples);
+    const std::int64_t blockEndSample = blockStartSample + static_cast<std::int64_t> (numSamples);
 
     // Backwards walk: removeAt swaps the LAST entry into the vacated slot, so
     // iterating downwards visits every entry exactly once regardless of removals.
@@ -114,8 +106,8 @@ void SoundingNoteTable::emitDueNoteOffs (juce::MidiBuffer& midi,
         // flush. Emit it immediately rather than dropping it — a late note-off is a
         // blemish, a missing one is a hung note.
         const std::int64_t delta = e.dueOffSample - blockStartSample;
-        const auto offset = static_cast<int> (
-            juce::jlimit<std::int64_t> (0, static_cast<std::int64_t> (numSamples) - 1, delta));
+        const auto offset =
+            static_cast<int> (juce::jlimit<std::int64_t> (0, static_cast<std::int64_t> (numSamples) - 1, delta));
 
         emitNoteOff (midi, e, offset);
         removeAt (i);
@@ -137,8 +129,8 @@ void SoundingNoteTable::flush (juce::MidiBuffer& midi, int offset) noexcept
         emitNoteOff (midi, e, safeOffset);
 
         if (e.channel >= 1 && e.channel <= 16)
-            sweepChannels = static_cast<std::uint16_t> (
-                sweepChannels | static_cast<std::uint16_t> (1u << (e.channel - 1)));
+            sweepChannels =
+                static_cast<std::uint16_t> (sweepChannels | static_cast<std::uint16_t> (1u << (e.channel - 1)));
     }
 
     count = 0;
@@ -152,11 +144,7 @@ void SoundingNoteTable::flush (juce::MidiBuffer& midi, int offset) noexcept
         if ((sweepChannels & static_cast<std::uint16_t> (1u << ch)) == 0)
             continue;
 
-        const juce::uint8 bytes[3] = {
-            static_cast<juce::uint8> (controlChangeStatus | ch),
-            allNotesOffController,
-            0
-        };
+        const juce::uint8 bytes[3] = { static_cast<juce::uint8> (controlChangeStatus | ch), allNotesOffController, 0 };
         midi.addEvent (bytes, 3, safeOffset);
     }
 }

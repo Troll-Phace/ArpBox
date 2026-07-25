@@ -75,9 +75,8 @@ void Transport::locateToPpq (double targetPpq) noexcept
     // plugins across a locate are a single-segment APPROXIMATION. Acceptable for the
     // MVP (§8.1's `transport` carries one `bpm`). When the post-MVP tempo map lands,
     // this must walk the segment list instead of assuming one segment.
-    samplePosition = ppqPerSampleValue > 0.0
-                         ? static_cast<std::int64_t> (std::llround (targetPpq / ppqPerSampleValue))
-                         : 0;
+    samplePosition =
+        ppqPerSampleValue > 0.0 ? static_cast<std::int64_t> (std::llround (targetPpq / ppqPerSampleValue)) : 0;
     anchorSample = samplePosition;
     anchorPpq = targetPpq;
 }
@@ -89,9 +88,7 @@ void Transport::latchBlockStart (int numSamples) noexcept
 
     latchedPpq = ppqAtSample (samplePosition);
     latchedSamples = samplePosition;
-    latchedSeconds = currentSampleRate > 0.0
-                         ? static_cast<double> (samplePosition) / currentSampleRate
-                         : 0.0;
+    latchedSeconds = currentSampleRate > 0.0 ? static_cast<double> (samplePosition) / currentSampleRate : 0.0;
     latchedBpm = currentBpm;
     latchedPlaying = playing;
     latchedBlockLength = length;
@@ -100,8 +97,7 @@ void Transport::latchBlockStart (int numSamples) noexcept
     // Fixed 4/4 (§ class comment): the bar grid is a multiple of quarterNotesPerBar
     // from PPQ 0. std::floor keeps it correct for the (rejected today, but cheap to
     // stay honest about) negative case.
-    latchedBarStartPpq =
-        std::floor (latchedPpq / quarterNotesPerBar) * quarterNotesPerBar;
+    latchedBarStartPpq = std::floor (latchedPpq / quarterNotesPerBar) * quarterNotesPerBar;
 
     // Consume the one-shot edges: each is visible for EXACTLY the block whose drain
     // raised it.
@@ -132,51 +128,51 @@ void Transport::applyCommand (const EngineCommand& command) noexcept
 {
     switch (command.type)
     {
-        case EngineCommandType::transportPlay:
-            playing = true;
-            break;
+    case EngineCommandType::transportPlay:
+        playing = true;
+        break;
 
-        case EngineCommandType::transportStop:
-            // Stop AND rewind to the start (groovebox convention — there is no
-            // pause in the MVP; see the class comment). The edges below are what
-            // the sequencer node uses to flush its sounding-note table in THIS
-            // block (§5.5). The stop counter is bumped UNCONDITIONALLY, even for a
-            // redundant stop while already stopped: a re-requested flush costs one
-            // CC123 sweep, whereas suppressing it risks a hung note, and hung notes
-            // are the worse failure by a wide margin.
-            playing = false;
-            stopEdge = true;
-            ++stopCounter;
-            locateToPpq (0.0);
+    case EngineCommandType::transportStop:
+        // Stop AND rewind to the start (groovebox convention — there is no
+        // pause in the MVP; see the class comment). The edges below are what
+        // the sequencer node uses to flush its sounding-note table in THIS
+        // block (§5.5). The stop counter is bumped UNCONDITIONALLY, even for a
+        // redundant stop while already stopped: a re-requested flush costs one
+        // CC123 sweep, whereas suppressing it risks a hung note, and hung notes
+        // are the worse failure by a wide margin.
+        playing = false;
+        stopEdge = true;
+        ++stopCounter;
+        locateToPpq (0.0);
+        positionJumpEdge = true;
+        break;
+
+    case EngineCommandType::transportLocate:
+        // value.d = target PPQ. Reject non-finite and negative targets: a NaN
+        // would poison every subsequent ppqAtSample() (and jlimit(NaN) is
+        // ill-defined), and the timeline starts at 0. Same defensive posture as
+        // MasterProcessor::applyCommand after issue #3.
+        if (std::isfinite (command.value.d) && command.value.d >= 0.0)
+        {
+            locateToPpq (command.value.d);
             positionJumpEdge = true;
-            break;
+        }
+        break;
 
-        case EngineCommandType::transportLocate:
-            // value.d = target PPQ. Reject non-finite and negative targets: a NaN
-            // would poison every subsequent ppqAtSample() (and jlimit(NaN) is
-            // ill-defined), and the timeline starts at 0. Same defensive posture as
-            // MasterProcessor::applyCommand after issue #3.
-            if (std::isfinite (command.value.d) && command.value.d >= 0.0)
-            {
-                locateToPpq (command.value.d);
-                positionJumpEdge = true;
-            }
-            break;
+    case EngineCommandType::setTempoBpm:
+        // value.d = target BPM. Drop a non-finite value (keep the current
+        // tempo); otherwise clamp into [minBpm, maxBpm] before re-anchoring.
+        if (std::isfinite (command.value.d))
+            reanchor (command.value.d);
+        break;
 
-        case EngineCommandType::setTempoBpm:
-            // value.d = target BPM. Drop a non-finite value (keep the current
-            // tempo); otherwise clamp into [minBpm, maxBpm] before re-anchoring.
-            if (std::isfinite (command.value.d))
-                reanchor (command.value.d);
-            break;
-
-        case EngineCommandType::none:
-        case EngineCommandType::setMasterGainDb:
-        case EngineCommandType::setLimiterEnabled:
-        case EngineCommandType::setTestToneEnabled:
-        case EngineCommandType::setTestToneFrequency:
-        default:
-            break; // not ours — every sink sees every command (see ICommandSink.h)
+    case EngineCommandType::none:
+    case EngineCommandType::setMasterGainDb:
+    case EngineCommandType::setLimiterEnabled:
+    case EngineCommandType::setTestToneEnabled:
+    case EngineCommandType::setTestToneFrequency:
+    default:
+        break; // not ours — every sink sees every command (see ICommandSink.h)
     }
 }
 } // namespace arpbox::engine

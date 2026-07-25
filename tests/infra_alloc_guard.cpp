@@ -34,8 +34,7 @@ using arpbox::engine::EngineCommandType;
 using arpbox::engine::EngineGraph;
 using arpbox::test::AllocationSentinel;
 
-TEST_CASE ("infra/alloc-sentinel: counts allocations only inside an armed region",
-           "[perf-budget]")
+TEST_CASE ("infra/alloc-sentinel: counts allocations only inside an armed region", "[perf-budget]")
 {
     // Empty armed region → zero allocations.
     std::uint64_t emptyDelta = 0;

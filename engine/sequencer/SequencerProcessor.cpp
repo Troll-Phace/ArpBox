@@ -19,9 +19,8 @@ namespace
     //
     // Phase 6 replaces all of this with the adopted `PatternSnapshot`: 11 lanes over
     // up to 64 steps, per-lane length and clock division (§5.1 L1, §12.1).
-    constexpr int scaffoldSemitoneOffsets[SequencerProcessor::scaffoldNumSteps] = {
-        0, 2, 4, 5, 7, 9, 11, 12, 0, 2, 4, 5, 7, 9, 11, 12
-    };
+    constexpr int scaffoldSemitoneOffsets[SequencerProcessor::scaffoldNumSteps] = { 0, 2, 4, 5, 7, 9, 11, 12,
+                                                                                    0, 2, 4, 5, 7, 9, 11, 12 };
 
     // Reserved capacity (bytes) for the graph-owned OUTGOING MidiBuffer, ensured
     // unconditionally every block (ensureSize early-returns once satisfied). Sized for
@@ -104,8 +103,7 @@ void SequencerProcessor::releaseResources ()
 }
 
 // RT-SAFE:
-SequencerProcessor::StepEmission
-SequencerProcessor::describeStep (std::int64_t stepIndex) const noexcept
+SequencerProcessor::StepEmission SequencerProcessor::describeStep (std::int64_t stepIndex) const noexcept
 {
     // ── THE PHASE 6 SEAM (see StepEmission) ──────────────────────────────────
     // Everything below is scaffold. Phase 6 replaces the body with the §5.1
@@ -241,10 +239,8 @@ void SequencerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
         // Half-open [firstIndex, endIndex) with the SAME snapped ceiling applied to
         // both ends, so block k's endIndex equals block k+1's firstIndex exactly.
-        const std::int64_t firstIndex =
-            snappedStepCeiling (transport->blockStartPpq (), scaffoldStepPpq);
-        const std::int64_t endIndex =
-            snappedStepCeiling (transport->blockEndPpq (), scaffoldStepPpq);
+        const std::int64_t firstIndex = snappedStepCeiling (transport->blockStartPpq (), scaffoldStepPpq);
+        const std::int64_t endIndex = snappedStepCeiling (transport->blockEndPpq (), scaffoldStepPpq);
 
         for (std::int64_t index = firstIndex; index < endIndex; ++index)
         {
@@ -255,10 +251,9 @@ void SequencerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
             // when a boundary lands on the block edge, and juce::MidiBuffer does not
             // validate it — so the clamp is explicit rather than assumed.
             const double rawOffset = transport->blockOffsetForPpq (boundaryPpq);
-            const auto snapped = static_cast<std::int64_t> (
-                std::floor (rawOffset + sampleOffsetSnapSamples));
-            const auto offset = static_cast<int> (juce::jlimit<std::int64_t> (
-                0, static_cast<std::int64_t> (numSamples) - 1, snapped));
+            const auto snapped = static_cast<std::int64_t> (std::floor (rawOffset + sampleOffsetSnapSamples));
+            const auto offset =
+                static_cast<int> (juce::jlimit<std::int64_t> (0, static_cast<std::int64_t> (numSamples) - 1, snapped));
 
             emitStep (describeStep (index),
                       midi,
@@ -286,7 +281,6 @@ void SequencerProcessor::processBlock (juce::AudioBuffer<double>& buffer, juce::
 bool SequencerProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     // MIDI-only: accept only the empty (no main audio in/out) layout.
-    return layouts.getMainInputChannelSet ().isDisabled ()
-        && layouts.getMainOutputChannelSet ().isDisabled ();
+    return layouts.getMainInputChannelSet ().isDisabled () && layouts.getMainOutputChannelSet ().isDisabled ();
 }
 } // namespace arpbox::engine

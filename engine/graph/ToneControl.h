@@ -34,7 +34,7 @@ namespace arpbox::engine
     value each field has. */
 struct ToneControl
 {
-    std::atomic<bool> enabled { false };      ///< Debug tone on/off (default OFF).
-    std::atomic<float> frequencyHz { 440.0f };///< Tone frequency in Hz (default A4).
+    std::atomic<bool> enabled { false };       ///< Debug tone on/off (default OFF).
+    std::atomic<float> frequencyHz { 440.0f }; ///< Tone frequency in Hz (default A4).
 };
 } // namespace arpbox::engine

@@ -64,10 +64,7 @@ public:
     bool doesPluginStillExist (const juce::PluginDescription&) override { return true; }
     bool canScanForPlugins () const override { return true; }
     bool isTrivialToScan () const override { return true; }
-    bool requiresUnblockedMessageThreadDuringCreation (const juce::PluginDescription&) const override
-    {
-        return false;
-    }
+    bool requiresUnblockedMessageThreadDuringCreation (const juce::PluginDescription&) const override { return false; }
 
     // ── Load/instantiate instrumentation (test-only, not part of the format API) ─
     // The "was I actually loaded?" probe for the crash-recovery regression tests.

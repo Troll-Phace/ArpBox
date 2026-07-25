@@ -18,10 +18,9 @@ namespace
 } // namespace
 
 MasterProcessor::MasterProcessor ()
-    : juce::AudioProcessor (
-          BusesProperties ()
-              .withInput ("Input", juce::AudioChannelSet::stereo (), true)
-              .withOutput ("Output", juce::AudioChannelSet::stereo (), true))
+    : juce::AudioProcessor (BusesProperties ()
+                                .withInput ("Input", juce::AudioChannelSet::stereo (), true)
+                                .withOutput ("Output", juce::AudioChannelSet::stereo (), true))
 {
 }
 
@@ -36,8 +35,7 @@ void MasterProcessor::setSharedState (EngineSnapshotBuffer* snapshots, ToneContr
 void MasterProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock)
 {
     const auto sr = sampleRate > 0.0 ? sampleRate : 44100.0;
-    const auto blockSize =
-        static_cast<juce::uint32> (juce::jmax (1, maximumExpectedSamplesPerBlock));
+    const auto blockSize = static_cast<juce::uint32> (juce::jmax (1, maximumExpectedSamplesPerBlock));
 
     const juce::dsp::ProcessSpec spec { sr, blockSize, 2 };
 
@@ -56,39 +54,39 @@ void MasterProcessor::applyCommand (const EngineCommand& command) noexcept
 {
     switch (command.type)
     {
-        case EngineCommandType::setMasterGainDb:
-            // Sanitize the target gain (issue #3 residual). A non-finite dB target
-            // makes dsp::Gain emit NaN AFTER the input scrub and BEFORE the limiter,
-            // re-poisoning the limiter's ballistics into permanent silence. Drop a
-            // non-finite value (keep the current gain); otherwise clamp to a sane
-            // master range before applying. isfinite + jlimit only — no alloc/lock.
-            if (std::isfinite (command.value.f))
-                outputGain.setGainDecibels (juce::jlimit (-100.0f, 24.0f, command.value.f)); // smoothed to target
-            break;
+    case EngineCommandType::setMasterGainDb:
+        // Sanitize the target gain (issue #3 residual). A non-finite dB target
+        // makes dsp::Gain emit NaN AFTER the input scrub and BEFORE the limiter,
+        // re-poisoning the limiter's ballistics into permanent silence. Drop a
+        // non-finite value (keep the current gain); otherwise clamp to a sane
+        // master range before applying. isfinite + jlimit only — no alloc/lock.
+        if (std::isfinite (command.value.f))
+            outputGain.setGainDecibels (juce::jlimit (-100.0f, 24.0f, command.value.f)); // smoothed to target
+        break;
 
-        case EngineCommandType::setLimiterEnabled:
-            limiterEnabled = command.value.i != 0;
-            break;
+    case EngineCommandType::setLimiterEnabled:
+        limiterEnabled = command.value.i != 0;
+        break;
 
-        case EngineCommandType::setTestToneEnabled:
-            if (toneControl != nullptr)
-                toneControl->enabled.store (command.value.i != 0, std::memory_order_relaxed);
-            break;
+    case EngineCommandType::setTestToneEnabled:
+        if (toneControl != nullptr)
+            toneControl->enabled.store (command.value.i != 0, std::memory_order_relaxed);
+        break;
 
-        case EngineCommandType::setTestToneFrequency:
-            // Drop a non-finite frequency (issue #3 residual): the tone node's own
-            // [20, 20000] clamp is jlimit-based, and jlimit(NaN) is ill-defined.
-            if (toneControl != nullptr && std::isfinite (command.value.f))
-                toneControl->frequencyHz.store (command.value.f, std::memory_order_relaxed);
-            break;
+    case EngineCommandType::setTestToneFrequency:
+        // Drop a non-finite frequency (issue #3 residual): the tone node's own
+        // [20, 20000] clamp is jlimit-based, and jlimit(NaN) is ill-defined.
+        if (toneControl != nullptr && std::isfinite (command.value.f))
+            toneControl->frequencyHz.store (command.value.f, std::memory_order_relaxed);
+        break;
 
-        case EngineCommandType::none:
-        case EngineCommandType::transportPlay:
-        case EngineCommandType::transportStop:
-        case EngineCommandType::transportLocate:
-        case EngineCommandType::setTempoBpm:
-        default:
-            break; // not ours (Transport owns the transport commands) — ignore
+    case EngineCommandType::none:
+    case EngineCommandType::transportPlay:
+    case EngineCommandType::transportStop:
+    case EngineCommandType::transportLocate:
+    case EngineCommandType::setTempoBpm:
+    default:
+        break; // not ours (Transport owns the transport commands) — ignore
     }
 }
 
@@ -189,9 +187,8 @@ void MasterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         }
 
         peak[ch] = chPeak;
-        rms[ch] = numSamples > 0
-                      ? static_cast<float> (std::sqrt (sumSquares / static_cast<double> (numSamples)))
-                      : 0.0f;
+        rms[ch] =
+            numSamples > 0 ? static_cast<float> (std::sqrt (sumSquares / static_cast<double> (numSamples))) : 0.0f;
     }
 
     // Mono safety: mirror L→R so the UI shows matching meters if ever mono.
@@ -221,9 +218,8 @@ void MasterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         snap.rmsL = rms[0];
         snap.rmsR = rms[1];
         snap.deviceStatus = deviceStatus.load (std::memory_order_relaxed);
-        snap.voiceCount = voiceCountSource != nullptr
-                              ? voiceCountSource->load (std::memory_order_relaxed)
-                              : static_cast<std::uint16_t> (0);
+        snap.voiceCount = voiceCountSource != nullptr ? voiceCountSource->load (std::memory_order_relaxed)
+                                                      : static_cast<std::uint16_t> (0);
         snap.blockCounter = blockCounter;
 
         snapshotBuffer->beginWrite () = snap;
@@ -244,7 +240,7 @@ void MasterProcessor::processBlock (juce::AudioBuffer<double>& buffer, juce::Mid
 
 bool MasterProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-    return layouts.getMainInputChannelSet () == juce::AudioChannelSet::stereo ()
-        && layouts.getMainOutputChannelSet () == juce::AudioChannelSet::stereo ();
+    return layouts.getMainInputChannelSet () == juce::AudioChannelSet::stereo () &&
+           layouts.getMainOutputChannelSet () == juce::AudioChannelSet::stereo ();
 }
 } // namespace arpbox::engine

@@ -36,8 +36,8 @@ struct EngineSnapshot
     float rmsR = 0.0f;  ///< Right RMS over the block, linear.
 
     // ── Generative / sequencer (Phase 5+; zeroed until then) ─────────────────
-    std::uint32_t seed = 0;        ///< Current master seed (for the UI readout).
-    std::uint16_t voiceCount = 0;  ///< Live sounding-note count.
+    std::uint32_t seed = 0;       ///< Current master seed (for the UI readout).
+    std::uint16_t voiceCount = 0; ///< Live sounding-note count.
 
     // ── Engine/device status ────────────────────────────────────────────────
     std::uint8_t deviceStatus = 0; ///< Device-state LEVEL (see app/master enum).

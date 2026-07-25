@@ -56,10 +56,8 @@ public:
         // available at launch WITHOUT rescanning. A fresh install simply starts empty.
         pluginManager->restore ();
 
-        mainWindow = std::make_unique<MainWindow> (getApplicationName (),
-                                                   *audioEngine,
-                                                   *pluginManager,
-                                                   scanWorkerForceKilled);
+        mainWindow =
+            std::make_unique<MainWindow> (getApplicationName (), *audioEngine, *pluginManager, scanWorkerForceKilled);
     }
 
     void shutdown () override
@@ -109,10 +107,10 @@ private:
 
     // Declaration order == reverse destruction order. Destroyed bottom-to-top:
     // mainWindow (joins the scan thread) → pluginManager → pluginFormats → engine.
-    std::unique_ptr<AudioEngine> audioEngine;         ///< Destroyed LAST.
-    juce::AudioPluginFormatManager pluginFormats;      ///< Borrowed by pluginManager; outlives it.
+    std::unique_ptr<AudioEngine> audioEngine;     ///< Destroyed LAST.
+    juce::AudioPluginFormatManager pluginFormats; ///< Borrowed by pluginManager; outlives it.
     std::unique_ptr<hosting::PluginManager> pluginManager;
-    std::unique_ptr<MainWindow> mainWindow;            ///< Destroyed FIRST.
+    std::unique_ptr<MainWindow> mainWindow; ///< Destroyed FIRST.
 };
 } // namespace arpbox::app
 

@@ -86,10 +86,22 @@ inline void countedFree (void* ptr) noexcept
 
 namespace arpbox::test
 {
-void setAllocationCounterArmed (bool armed) noexcept { tlArmed = armed; }
-bool isAllocationCounterArmed () noexcept { return tlArmed; }
-std::uint64_t allocationCount () noexcept { return tlAllocations; }
-std::uint64_t deallocationCount () noexcept { return tlDeallocations; }
+void setAllocationCounterArmed (bool armed) noexcept
+{
+    tlArmed = armed;
+}
+bool isAllocationCounterArmed () noexcept
+{
+    return tlArmed;
+}
+std::uint64_t allocationCount () noexcept
+{
+    return tlAllocations;
+}
+std::uint64_t deallocationCount () noexcept
+{
+    return tlDeallocations;
+}
 } // namespace arpbox::test
 
 // ── Replaceable global allocation functions (C++ [new.delete]) ───────────────
@@ -119,16 +131,34 @@ void* operator new[] (std::size_t size, const std::nothrow_t&) noexcept
     return countedAllocate (size);
 }
 
-void operator delete (void* ptr) noexcept { countedFree (ptr); }
-void operator delete[] (void* ptr) noexcept { countedFree (ptr); }
+void operator delete (void* ptr) noexcept
+{
+    countedFree (ptr);
+}
+void operator delete[] (void* ptr) noexcept
+{
+    countedFree (ptr);
+}
 
 // Sized-deallocation overloads (C++14): define them so the compiler cannot pick a
 // default that bypasses our free counting.
-void operator delete (void* ptr, std::size_t) noexcept { countedFree (ptr); }
-void operator delete[] (void* ptr, std::size_t) noexcept { countedFree (ptr); }
+void operator delete (void* ptr, std::size_t) noexcept
+{
+    countedFree (ptr);
+}
+void operator delete[] (void* ptr, std::size_t) noexcept
+{
+    countedFree (ptr);
+}
 
-void operator delete (void* ptr, const std::nothrow_t&) noexcept { countedFree (ptr); }
-void operator delete[] (void* ptr, const std::nothrow_t&) noexcept { countedFree (ptr); }
+void operator delete (void* ptr, const std::nothrow_t&) noexcept
+{
+    countedFree (ptr);
+}
+void operator delete[] (void* ptr, const std::nothrow_t&) noexcept
+{
+    countedFree (ptr);
+}
 
 // Over-aligned overloads (C++17 [new.delete] with std::align_val_t). Without these
 // an over-aligned allocation on a measured path would bypass the counter — a
@@ -158,13 +188,31 @@ void* operator new[] (std::size_t size, std::align_val_t align, const std::nothr
     return countedAlignedAllocate (size, align);
 }
 
-void operator delete (void* ptr, std::align_val_t) noexcept { countedFree (ptr); }
-void operator delete[] (void* ptr, std::align_val_t) noexcept { countedFree (ptr); }
+void operator delete (void* ptr, std::align_val_t) noexcept
+{
+    countedFree (ptr);
+}
+void operator delete[] (void* ptr, std::align_val_t) noexcept
+{
+    countedFree (ptr);
+}
 
 // Sized + aligned deallocation forms.
-void operator delete (void* ptr, std::size_t, std::align_val_t) noexcept { countedFree (ptr); }
-void operator delete[] (void* ptr, std::size_t, std::align_val_t) noexcept { countedFree (ptr); }
+void operator delete (void* ptr, std::size_t, std::align_val_t) noexcept
+{
+    countedFree (ptr);
+}
+void operator delete[] (void* ptr, std::size_t, std::align_val_t) noexcept
+{
+    countedFree (ptr);
+}
 
 // Nothrow + aligned deallocation forms (pair with the nothrow aligned news).
-void operator delete (void* ptr, std::align_val_t, const std::nothrow_t&) noexcept { countedFree (ptr); }
-void operator delete[] (void* ptr, std::align_val_t, const std::nothrow_t&) noexcept { countedFree (ptr); }
+void operator delete (void* ptr, std::align_val_t, const std::nothrow_t&) noexcept
+{
+    countedFree (ptr);
+}
+void operator delete[] (void* ptr, std::align_val_t, const std::nothrow_t&) noexcept
+{
+    countedFree (ptr);
+}

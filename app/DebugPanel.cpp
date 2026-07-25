@@ -9,53 +9,53 @@ using namespace juce;
 
 namespace
 {
-/** Formats a LINEAR amplitude as a dB string for display (handles -inf). */
-String linearToDbString (float linear)
-{
-    return Decibels::toString (Decibels::gainToDecibels (linear), 1);
-}
-
-// ── Incremental scan-save throttle (issue #19 stopgap) ────────────────────────
-// The vblank persists the KnownPluginList mid-scan after BOTH: the known-type count
-// has grown by >= kScanSaveTypeGrowth since the last save, AND at least
-// kScanSaveMinIntervalMs has elapsed. The growth gate is 1 (bank ANY new type),
-// throttled to at most once per second: a coarser gate (e.g. 20) would defeat
-// recovery in the clustered-crasher case — if fewer than the threshold clean
-// plugins scan before each hostile one crashes the host, nothing would ever bank
-// and every relaunch re-scans the same un-persisted types into the same crash, an
-// infinite no-progress loop. At growth==1 a crash loses at most ~1 s of scanning
-// and progress always accumulates across relaunches.
-constexpr int kScanSaveTypeGrowth = 1;
-constexpr std::uint32_t kScanSaveMinIntervalMs = 1000;
-
-/** Maps a device-status level to a human-readable banner string. */
-String statusText (std::uint8_t status)
-{
-    switch (status)
+    /** Formats a LINEAR amplitude as a dB string for display (handles -inf). */
+    String linearToDbString (float linear)
     {
-        case engine::deviceStatusFellBackToDefault: return "DEVICE LOST — fell back to default";
-        case engine::deviceStatusDead:              return "DEVICE DEAD — no output";
-        case engine::deviceStatusOk:
-        default:                                    return "DEVICE OK";
+        return Decibels::toString (Decibels::gainToDecibels (linear), 1);
     }
-}
+
+    // ── Incremental scan-save throttle (issue #19 stopgap) ────────────────────────
+    // The vblank persists the KnownPluginList mid-scan after BOTH: the known-type count
+    // has grown by >= kScanSaveTypeGrowth since the last save, AND at least
+    // kScanSaveMinIntervalMs has elapsed. The growth gate is 1 (bank ANY new type),
+    // throttled to at most once per second: a coarser gate (e.g. 20) would defeat
+    // recovery in the clustered-crasher case — if fewer than the threshold clean
+    // plugins scan before each hostile one crashes the host, nothing would ever bank
+    // and every relaunch re-scans the same un-persisted types into the same crash, an
+    // infinite no-progress loop. At growth==1 a crash loses at most ~1 s of scanning
+    // and progress always accumulates across relaunches.
+    constexpr int kScanSaveTypeGrowth = 1;
+    constexpr std::uint32_t kScanSaveMinIntervalMs = 1000;
+
+    /** Maps a device-status level to a human-readable banner string. */
+    String statusText (std::uint8_t status)
+    {
+        switch (status)
+        {
+        case engine::deviceStatusFellBackToDefault:
+            return "DEVICE LOST — fell back to default";
+        case engine::deviceStatusDead:
+            return "DEVICE DEAD — no output";
+        case engine::deviceStatusOk:
+        default:
+            return "DEVICE OK";
+        }
+    }
 } // namespace
 
 // MESSAGE-THREAD ONLY.
 DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bool& scanForceKilledSinkRef)
-    : audioEngine (engine),
-      pluginManager (plugins),
-      scanForceKilledSink (scanForceKilledSinkRef),
-      synthSlot (engine, plugins.getFormatManager ()),
-      vblank (this, [this] { refreshFromEngine (); })
+    : audioEngine (engine)
+    , pluginManager (plugins)
+    , scanForceKilledSink (scanForceKilledSinkRef)
+    , synthSlot (engine, plugins.getFormatManager ())
+    , vblank (this, [this] { refreshFromEngine (); })
 {
     // ── Test tone toggle ─────────────────────────────────────────────────────
     addAndMakeVisible (testToneButton);
     testToneButton.onClick = [this]
-    {
-        pushInt (engine::EngineCommandType::setTestToneEnabled,
-                 testToneButton.getToggleState () ? 1 : 0);
-    };
+    { pushInt (engine::EngineCommandType::setTestToneEnabled, testToneButton.getToggleState () ? 1 : 0); };
 
     // ── Frequency slider (Hz) ────────────────────────────────────────────────
     addAndMakeVisible (frequencyLabel);
@@ -65,10 +65,7 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     frequencySlider.setValue (440.0, dontSendNotification);
     frequencySlider.setTextValueSuffix (" Hz");
     frequencySlider.onValueChange = [this]
-    {
-        pushFloat (engine::EngineCommandType::setTestToneFrequency,
-                   static_cast<float> (frequencySlider.getValue ()));
-    };
+    { pushFloat (engine::EngineCommandType::setTestToneFrequency, static_cast<float> (frequencySlider.getValue ())); };
 
     // ── Master gain slider (dB) ──────────────────────────────────────────────
     addAndMakeVisible (masterGainLabel);
@@ -77,19 +74,13 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     masterGainSlider.setValue (0.0, dontSendNotification);
     masterGainSlider.setTextValueSuffix (" dB");
     masterGainSlider.onValueChange = [this]
-    {
-        pushFloat (engine::EngineCommandType::setMasterGainDb,
-                   static_cast<float> (masterGainSlider.getValue ()));
-    };
+    { pushFloat (engine::EngineCommandType::setMasterGainDb, static_cast<float> (masterGainSlider.getValue ())); };
 
     // ── Safety limiter toggle (default ON, §7) ───────────────────────────────
     addAndMakeVisible (limiterButton);
     limiterButton.setToggleState (true, dontSendNotification);
     limiterButton.onClick = [this]
-    {
-        pushInt (engine::EngineCommandType::setLimiterEnabled,
-                 limiterButton.getToggleState () ? 1 : 0);
-    };
+    { pushInt (engine::EngineCommandType::setLimiterEnabled, limiterButton.getToggleState () ? 1 : 0); };
 
     // ── Transport (DEV-ONLY; the real header transport lands in Phase 15.3) ───
     // Play/Stop and tempo are plain commands on the canonical queue; the readout
@@ -106,10 +97,7 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     bpmSlider.setRange (engine::Transport::minBpm, engine::Transport::maxBpm, 0.01);
     bpmSlider.setValue (engine::Transport::defaultBpm, dontSendNotification);
     bpmSlider.setTextValueSuffix (" BPM");
-    bpmSlider.onValueChange = [this]
-    {
-        pushDouble (engine::EngineCommandType::setTempoBpm, bpmSlider.getValue ());
-    };
+    bpmSlider.onValueChange = [this] { pushDouble (engine::EngineCommandType::setTempoBpm, bpmSlider.getValue ()); };
 
     // ── Simulate device loss (dev-only) ──────────────────────────────────────
     addAndMakeVisible (simulateLossButton);
@@ -162,17 +150,21 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     synthGainSlider.setRange (-60.0, 6.0, 0.1);
     synthGainSlider.setValue (0.0, dontSendNotification);
     synthGainSlider.setTextValueSuffix (" dB");
-    synthGainSlider.onValueChange = [this]
-    {
-        synthSlot.setGainDb (static_cast<float> (synthGainSlider.getValue ()));
-    };
+    synthGainSlider.onValueChange = [this] { synthSlot.setGainDb (static_cast<float> (synthGainSlider.getValue ())); };
 
     addAndMakeVisible (synthStatusLabel);
     synthStatusLabel.setText ("synth: none", dontSendNotification);
 
     // ── Readout labels ───────────────────────────────────────────────────────
-    for (auto* label :
-         { &deviceLabel, &statusBanner, &meterLabel, &transportLabel, &voiceLabel, &blockLabel, &eventLabel, &pluginCountLabel, &scanStatusLabel })
+    for (auto* label : { &deviceLabel,
+                         &statusBanner,
+                         &meterLabel,
+                         &transportLabel,
+                         &voiceLabel,
+                         &blockLabel,
+                         &eventLabel,
+                         &pluginCountLabel,
+                         &scanStatusLabel })
         addAndMakeVisible (*label);
 
     // Initial known-plugin count reflects the list restored at launch (Main.cpp
@@ -225,7 +217,8 @@ DebugPanel::~DebugPanel ()
 // ── Background plugin scan (DEV-ONLY) ─────────────────────────────────────────
 
 DebugPanel::ScanThread::ScanThread (DebugPanel& ownerPanel)
-    : juce::Thread ("arpbox-plugin-scan"), owner (ownerPanel)
+    : juce::Thread ("arpbox-plugin-scan")
+    , owner (ownerPanel)
 {
 }
 
@@ -328,9 +321,8 @@ void DebugPanel::refreshSynthList ()
     // refresh (e.g. after a scan adds more instruments).
     const int prevIndex = synthList.getSelectedItemIndex ();
     const bool hadSelection = prevIndex >= 0 && prevIndex < instrumentDescriptions.size ();
-    const String prevIdentifier = hadSelection
-                                      ? instrumentDescriptions.getReference (prevIndex).createIdentifierString ()
-                                      : String {};
+    const String prevIdentifier =
+        hadSelection ? instrumentDescriptions.getReference (prevIndex).createIdentifierString () : String {};
 
     instrumentDescriptions.clearQuick ();
     synthList.clear (dontSendNotification);
@@ -359,8 +351,8 @@ void DebugPanel::refreshSynthStatus ()
 {
     String text;
     if (synthSlot.isLoaded ())
-        text = "synth: " + synthSlot.getCurrentSynthName ()
-             + "  (latency " + String (synthSlot.getLatencySamples ()) + " smp)";
+        text = "synth: " + synthSlot.getCurrentSynthName () + "  (latency " + String (synthSlot.getLatencySamples ()) +
+               " smp)";
     else
         text = "synth: none";
 
@@ -478,16 +470,14 @@ void DebugPanel::refreshFromEngine ()
     const auto& snapshot = audioEngine.snapshots ().read ();
 
     // ── Meters (convert LINEAR → dB for display only) ────────────────────────
-    meterLabel.setText ("peak L/R: " + linearToDbString (snapshot.peakL)
-                            + " / " + linearToDbString (snapshot.peakR)
-                            + "   rms L/R: " + linearToDbString (snapshot.rmsL)
-                            + " / " + linearToDbString (snapshot.rmsR),
+    meterLabel.setText ("peak L/R: " + linearToDbString (snapshot.peakL) + " / " + linearToDbString (snapshot.peakR) +
+                            "   rms L/R: " + linearToDbString (snapshot.rmsL) + " / " +
+                            linearToDbString (snapshot.rmsR),
                         dontSendNotification);
 
     // ── Transport (Phase 5.1 snapshot fields; the engine is the source of truth) ──
-    transportLabel.setText (String (snapshot.isPlaying ? "transport: PLAYING" : "transport: STOPPED")
-                                + "   ppq " + String (snapshot.ppqPosition, 3)
-                                + "   " + String (snapshot.bpm, 2) + " BPM",
+    transportLabel.setText (String (snapshot.isPlaying ? "transport: PLAYING" : "transport: STOPPED") + "   ppq " +
+                                String (snapshot.ppqPosition, 3) + "   " + String (snapshot.bpm, 2) + " BPM",
                             dontSendNotification);
 
     // ── Live MIDI-in voice count (interim; sequencer owns it in Phase 8) ─────
@@ -496,33 +486,30 @@ void DebugPanel::refreshFromEngine ()
     // ── Starvation: blockCounter must advance frame-over-frame ───────────────
     const bool advancing = snapshot.blockCounter != lastBlockCounter;
     lastBlockCounter = snapshot.blockCounter;
-    blockLabel.setText ("block: " + String (snapshot.blockCounter)
-                            + (advancing ? "" : "   [STARVED]"),
+    blockLabel.setText ("block: " + String (snapshot.blockCounter) + (advancing ? "" : "   [STARVED]"),
                         dontSendNotification);
 
     // ── Device-status banner (level field) ───────────────────────────────────
     statusBanner.setText (statusText (snapshot.deviceStatus), dontSendNotification);
     statusBanner.setColour (Label::backgroundColourId,
-                            snapshot.deviceStatus == engine::deviceStatusOk ? Colours::darkgreen
-                            : snapshot.deviceStatus == engine::deviceStatusFellBackToDefault
-                                ? Colours::darkorange
-                                : Colours::darkred);
+                            snapshot.deviceStatus == engine::deviceStatusOk                  ? Colours::darkgreen
+                            : snapshot.deviceStatus == engine::deviceStatusFellBackToDefault ? Colours::darkorange
+                                                                                             : Colours::darkred);
 
     // Device description can change after a fallback.
     deviceLabel.setText (audioEngine.getCurrentDeviceDescription (), dontSendNotification);
 
     // ── Drain audio-thread events (we are the sole UI consumer) ──────────────
-    audioEngine.events ().drain ([this] (const engine::EngineEvent& e)
-    {
-        ++engineEventCount;
-        lastEventText = "type " + String (static_cast<int> (e.type))
-                      + " (a=" + String (e.a) + ", b=" + String (e.b) + ")";
-    });
+    audioEngine.events ().drain (
+        [this] (const engine::EngineEvent& e)
+        {
+            ++engineEventCount;
+            lastEventText =
+                "type " + String (static_cast<int> (e.type)) + " (a=" + String (e.a) + ", b=" + String (e.b) + ")";
+        });
 
-    eventLabel.setText ("events: " + String (engineEventCount)
-                            + " [" + lastEventText + "]"
-                            + "  |  dropped cmds: "
-                            + String (audioEngine.commands ().getDroppedCount ()),
+    eventLabel.setText ("events: " + String (engineEventCount) + " [" + lastEventText + "]" +
+                            "  |  dropped cmds: " + String (audioEngine.commands ().getDroppedCount ()),
                         dontSendNotification);
 
     // ── Plugin scan (DEV-ONLY) ───────────────────────────────────────────────
@@ -540,10 +527,10 @@ void DebugPanel::refreshFromEngine ()
         refreshSynthList (); // newly-scanned instruments can now be loaded.
         scanButton.setEnabled (true);
         cancelScanButton.setEnabled (false);
-        scanStatusLabel.setText ("scan complete: " + String (lastScannedTypeCount.load (std::memory_order_relaxed))
-                                     + " types, " + String (lastScanFailedCount.load (std::memory_order_relaxed))
-                                     + " failed"
-                                     + (lastPersistFailed ? String ("   [SAVE FAILED — see log]") : String ()),
+        scanStatusLabel.setText ("scan complete: " + String (lastScannedTypeCount.load (std::memory_order_relaxed)) +
+                                     " types, " + String (lastScanFailedCount.load (std::memory_order_relaxed)) +
+                                     " failed" +
+                                     (lastPersistFailed ? String ("   [SAVE FAILED — see log]") : String ()),
                                  dontSendNotification);
     }
 
@@ -579,8 +566,7 @@ void DebugPanel::refreshFromEngine ()
         const int liveCount = pluginManager.getKnownPluginList ().getNumTypes ();
         const std::uint32_t nowMs = Time::getMillisecondCounter ();
 
-        if (liveCount - lastSavedTypeCount >= kScanSaveTypeGrowth
-            && nowMs - lastSaveTimeMs >= kScanSaveMinIntervalMs)
+        if (liveCount - lastSavedTypeCount >= kScanSaveTypeGrowth && nowMs - lastSaveTimeMs >= kScanSaveMinIntervalMs)
         {
             // save() logs the failure itself (issue #17); here we only react to it.
             const auto saved = pluginManager.save ();
@@ -604,13 +590,11 @@ void DebugPanel::refreshFromEngine ()
             const ScopedLock sl (scanNameLock);
             name = currentScanName;
         }
-        scanStatusLabel.setText ("scanning "
-                                     + String (roundToInt (scanProgress.load (std::memory_order_relaxed) * 100.0f))
-                                     + "%   " + name
-                                     + (lastPersistFailed ? String ("   [SAVE FAILED — see log]") : String ()),
-                                 dontSendNotification);
-        pluginCountLabel.setText ("known plugins: " + String (liveCount) + " (scanning…)",
-                                  dontSendNotification);
+        scanStatusLabel.setText (
+            "scanning " + String (roundToInt (scanProgress.load (std::memory_order_relaxed) * 100.0f)) + "%   " + name +
+                (lastPersistFailed ? String ("   [SAVE FAILED — see log]") : String ()),
+            dontSendNotification);
+        pluginCountLabel.setText ("known plugins: " + String (liveCount) + " (scanning…)", dontSendNotification);
     }
     else
     {
@@ -625,8 +609,8 @@ void DebugPanel::refreshFromEngine ()
         // dead-man's-pedal blacklisted after a crash-recovery relaunch, and that
         // progress is accumulating (issue #19 stopgap).
         const auto& list = pluginManager.getKnownPluginList ();
-        pluginCountLabel.setText ("known plugins: " + String (list.getNumTypes ())
-                                      + "   quarantined: " + String (list.getBlacklistedFiles ().size ()),
+        pluginCountLabel.setText ("known plugins: " + String (list.getNumTypes ()) +
+                                      "   quarantined: " + String (list.getBlacklistedFiles ().size ()),
                                   dontSendNotification);
     }
 }
