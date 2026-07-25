@@ -7,6 +7,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <cstdint>
 #include <memory>
 
 namespace arpbox::hosting
@@ -118,7 +119,7 @@ private:
     // Message-thread swap state. `awaitingFadeOut` ⇒ the current synth is ramping to
     // silence; when it reports `isFadeOutComplete()`, `poll()` either inserts the
     // pending incoming node (swap) or removes the node (remove), whichever applies.
-    enum class State
+    enum class State : std::uint8_t
     {
         idle,
         awaitingFadeOut
