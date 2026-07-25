@@ -2,6 +2,8 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#include <cmath>
+
 namespace arpbox::app
 {
 using namespace juce;
@@ -114,6 +116,127 @@ void AudioEngine::initialiseDevice ()
     // app stays alive (silent) and the DebugPanel banner reports the dead state.
     jassert (error.isEmpty () || deviceManager.getCurrentAudioDevice () == nullptr);
     ignoreUnused (error);
+
+    // Whatever CoreAudio (or the persisted XML) landed on, it must be inside the
+    // supported envelope before we let the graph render at it (issue #56). Runs
+    // before the constructor evaluates the device-status level, so a refused device
+    // is already closed by the time that level is chosen.
+    enforceSampleRateCeiling ();
+}
+
+// Identity a clamp is remembered against. `AudioIODevice` exposes no stable UID, so
+// type name + device name is the strongest key JUCE offers; two identically-named
+// devices of the same type are indistinguishable here (and would need the same clamp
+// anyway, so the annotation stays true either way).
+static String deviceKeyFor (AudioIODevice& device)
+{
+    return device.getTypeName () + "/" + device.getName ();
+}
+
+// MESSAGE-THREAD ONLY. Is the recorded clamp still a TRUE statement about the device
+// as it is running right now? Same device, still at the rate we clamped it to.
+bool AudioEngine::clampStillApplies (juce::AudioIODevice& device) const
+{
+    return clampedFromSampleRate > 0.0 && deviceKeyFor (device) == clampedDeviceKey &&
+           std::abs (device.getCurrentSampleRate () - clampedToSampleRate) < 1.0;
+}
+
+// MESSAGE-THREAD ONLY. Drop the clamp record, and with it the readout annotation.
+// Deliberately does NOT touch `refusedSampleRate` — that annotation has its own
+// lifetime (it describes a device we closed, i.e. one that is not open to match).
+void AudioEngine::forgetClamp () noexcept
+{
+    clampedFromSampleRate = 0.0;
+    clampedToSampleRate = 0.0;
+    clampedDeviceKey.clear ();
+}
+
+// MESSAGE-THREAD ONLY. See the header for the contract; the arithmetic behind the
+// ceiling itself lives on `engine::kMaxSupportedSampleRate`.
+bool AudioEngine::enforceSampleRateCeiling ()
+{
+    auto* device = deviceManager.getCurrentAudioDevice ();
+
+    if (device == nullptr || ! device->isOpen ())
+    {
+        // Nothing open: a clamp recorded against a device that is no longer running
+        // has stopped being true, so forget it (issue #68). `refusedSampleRate` is
+        // preserved — the refuse path below closes the device precisely so that
+        // annotation is what the readout shows.
+        forgetClamp ();
+        return false;
+    }
+
+    const double negotiated = device->getCurrentSampleRate ();
+
+    if (negotiated <= engine::kMaxSupportedSampleRate)
+    {
+        // The common path — and, crucially, the path the clamp's OWN asynchronous
+        // change broadcast re-enters a message-queue turn later (issue #68). A
+        // compliant rate on its own cannot distinguish "compliant BECAUSE we just
+        // clamped it" from "compliant of its own accord", so this must not clear
+        // unconditionally: keep the annotation exactly while the recorded clamp still
+        // describes THIS device at THIS rate, and drop it otherwise (different
+        // device, or a different rate on the same device).
+        if (! clampStillApplies (*device))
+            forgetClamp ();
+
+        refusedSampleRate = 0.0;
+        return false;
+    }
+
+    // Highest rate the device offers that we can actually support. `<=` not `<`:
+    // exactly 192 kHz is supported (the 0.864-sample worst case is inside the bound).
+    double target = 0.0;
+    for (const double rate : device->getAvailableSampleRates ())
+        if (rate <= engine::kMaxSupportedSampleRate && rate > target)
+            target = rate;
+
+    if (target > 0.0)
+    {
+        // ONE attempt. The driver has the last word, so the result is re-read below
+        // rather than assumed — that is what keeps this free of a retry loop when a
+        // device refuses the change and re-broadcasts.
+        auto setup = deviceManager.getAudioDeviceSetup ();
+        setup.sampleRate = target;
+        deviceManager.setAudioDeviceSetup (setup, /*treatAsChosenDevice*/ true);
+    }
+
+    device = deviceManager.getCurrentAudioDevice ();
+
+    if (device != nullptr && device->isOpen () && device->getCurrentSampleRate () <= engine::kMaxSupportedSampleRate)
+    {
+        // Record the clamp against the DEVICE and the rate it landed on, not as a
+        // bare flag (issue #68): that is what lets the compliant-path branch above
+        // tell our own clamp apart from a device that never needed one, so the
+        // annotation outlives the change broadcast this very call provoked.
+        clampedFromSampleRate = negotiated;
+        clampedToSampleRate = device->getCurrentSampleRate ();
+        clampedDeviceKey = deviceKeyFor (*device);
+        refusedSampleRate = 0.0;
+
+        Logger::writeToLog ("ARPBOX: audio device negotiated " + String (negotiated / 1000.0, 1) +
+                            " kHz, above the supported ceiling of " +
+                            String (engine::kMaxSupportedSampleRate / 1000.0, 1) + " kHz; clamped to " +
+                            String (device->getCurrentSampleRate () / 1000.0, 1) + " kHz.");
+        return true;
+    }
+
+    // REFUSE. The device offers nothing we support (or would not move). Running at
+    // this rate would silently break the sequencer's sub-sample emission bound
+    // (issue #37), which is a wrong-timing failure the user cannot see or diagnose —
+    // so we close the device instead. Silence with a hard error banner is the honest
+    // outcome; the caller's status evaluation sees no device and reports
+    // `deviceStatusDead`.
+    forgetClamp ();
+    refusedSampleRate = negotiated;
+
+    Logger::writeToLog ("ARPBOX: audio device runs at " + String (negotiated / 1000.0, 1) +
+                        " kHz and offers no rate at or below the supported ceiling of " +
+                        String (engine::kMaxSupportedSampleRate / 1000.0, 1) + " kHz; device closed.");
+
+    deviceManager.closeAudioDevice ();
+    return true;
 }
 
 // MESSAGE-THREAD ONLY.
@@ -164,10 +287,27 @@ void AudioEngine::saveDeviceState ()
 // MESSAGE-THREAD ONLY.
 void AudioEngine::refreshDeviceDescription ()
 {
+    // The ceiling annotations (issue #56) ride the device readout so the clamp is
+    // visible wherever the device is: the DebugPanel shows this string every frame,
+    // and later phases' settings UI reads the same accessor. A clamp the user cannot
+    // see is a clamp they will report as a bug.
+    const auto ceilingText = String (engine::kMaxSupportedSampleRate / 1000.0, 1) + " kHz";
+
     if (auto* device = deviceManager.getCurrentAudioDevice ())
     {
         deviceDescription = device->getName () + " — " + String (device->getCurrentSampleRate () / 1000.0, 1) + " kHz" +
                             " / " + String (device->getCurrentBufferSizeSamples ()) + " smp";
+
+        if (clampedFromSampleRate > 0.0)
+        {
+            deviceDescription += " (clamped from " + String (clampedFromSampleRate / 1000.0, 1) +
+                                 " kHz — ARPBOX supports up to " + ceilingText + ")";
+        }
+    }
+    else if (refusedSampleRate > 0.0)
+    {
+        deviceDescription = "Unsupported device — " + String (refusedSampleRate / 1000.0, 1) +
+                            " kHz exceeds the supported ceiling of " + ceilingText;
     }
     else
     {
@@ -305,6 +445,13 @@ void AudioEngine::handleAsyncUpdate ()
 void AudioEngine::performFallback ()
 {
     const auto error = deviceManager.initialiseWithDefaultDevices (kNumInputChannels, kNumOutputChannels);
+
+    // The default device is subject to the same ceiling as any other (issue #56).
+    // Enforce BEFORE the health verdict below, and re-read the device afterwards: a
+    // refused device has been closed, which the `device != nullptr` test then turns
+    // into `deviceStatusDead` — the correct verdict, since we are genuinely silent.
+    enforceSampleRateCeiling ();
+
     auto* device = deviceManager.getCurrentAudioDevice ();
 
     if (error.isEmpty () && device != nullptr && device->isOpen ())
@@ -331,8 +478,25 @@ void AudioEngine::performFallback ()
 // internal auto-restart). Persist the new selection and refresh the readout.
 void AudioEngine::changeListenerCallback (juce::ChangeBroadcaster*)
 {
+    // A user picking a device in a settings UI reaches us ONLY here, so the ceiling
+    // has to be enforced on this path too (issue #56) — and before the readout is
+    // rebuilt and the selection persisted, so we never cache or save an unsupported
+    // rate. `AudioDeviceManager` broadcasts asynchronously, so the re-setup this may
+    // perform re-enters here later; by then the rate is inside the ceiling (or the
+    // device is closed), so the re-entry does NO device work — it only re-checks
+    // whether the clamp annotation is still true (issue #68). No loop.
+    const bool ceilingActed = enforceSampleRateCeiling ();
+
     refreshDeviceDescription ();
     saveDeviceState ();
+
+    // A refused device leaves us with no device at all: report the hard error rather
+    // than leaving a stale Ok/FellBack banner claiming health we do not have.
+    if (ceilingActed && deviceManager.getCurrentAudioDevice () == nullptr)
+    {
+        setDeviceStatus (engine::deviceStatusDead);
+        return;
+    }
 
     // Clear a stale FellBackToDefault banner when the user re-selects a genuinely
     // healthy device (issue #10). Guard against the fallback's OWN change broadcast:

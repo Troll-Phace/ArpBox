@@ -633,21 +633,41 @@ TEST_CASE ("sequencer/directions: walk steps exactly ±1 and reflects at the poo
     REQUIRE (badBottomReflections == 0);
     REQUIRE (badTopReflections == 0);
 
-    // NON-VACUOUS: the reflection assertions above are CONDITIONAL, so a walk that
-    // never reached an endpoint would satisfy them trivially. These say both ends
-    // really were hit, repeatedly, across the sweep.
+    // ── NON-VACUITY FLOORS — NOT A DISTRIBUTIONAL CLAIM (issue #63) ──────────
+    // The reflection assertions above are CONDITIONAL, so a walk that never reached
+    // an endpoint would satisfy them trivially. The two thresholds below exist for
+    // ONE reason: to say both ends really were hit, repeatedly, across the sweep.
     //
-    // The bounds are set against MEASURED values for this exact (fixed) seed set —
-    // 525 bottom and 68 top reflections — not against a statistical expectation. The
-    // two counts are lopsided because `splitmix64 (seed ^ 0x5741 ^ k)` is a hash, not
-    // a balanced stream: at small seeds and small k its low bit runs downward far
-    // more often than up (seed 0 alone contributes 157 bottom hits and 7 top). That
-    // is a property of the chosen constants, not a defect — every step is still
-    // exactly ±1 and every reflection is still correct, which is what the counters
-    // above assert. It does mean the thresholds must be read as "this fixed seed set
-    // reaches both ends", never as a distributional claim.
-    REQUIRE (bottomHits > 100);    // measured 525
-    REQUIRE (topHits > 25);        // measured 68
+    // WHAT THEY ARE: floors under MEASURED counts for this exact, fixed seed set —
+    // 525 bottom and 68 top reflections. They are re-measured numbers, not derived
+    // ones.
+    //
+    // WHAT THEY ARE NOT — READ THIS BEFORE "FIXING" ANYTHING: they are not a
+    // uniformity, symmetry or distributional contract on `walk`, and the gap between
+    // 525 and 68 is not a defect to be corrected. §12.3 specifies `walk` as "±1
+    // brownian", and the properties that ARE the contract — every step exactly ±1,
+    // every reflection correct, never a wrap, always in range, always starting at
+    // n / 2 — are the unconditional counters asserted above, all of which are green.
+    //
+    // WHY THE LOPSIDEDNESS: the bias sequence is `splitmix64 (seed ^ 0x5741 ^ k)`
+    // evaluated PER STEP INDEX — a hash, not a balanced sequential stream. Low-entropy
+    // inputs (small seeds, small k) produce a visibly skewed low bit: seed 0 alone
+    // contributes 157 bottom hits against 7 top. A hash makes no equidistribution
+    // promise over a handful of near-zero inputs, so this is a property of the chosen
+    // constants working as designed.
+    //
+    // WHEN THESE NUMBERS MUST BE RE-MEASURED: PHASE 12's seed engine. §5.2 composes
+    // the effective stream seed as
+    // `splitmix64 (masterSeed ^ operatorSeed ^ (loopLock ? 0 : barCounter))`, and
+    // DirectionModes.cpp already carries a Phase 12 note about deleting its local
+    // `splitmix64` in favour of the shared one. Any change to `walkSalt` (0x5741),
+    // to the mixing function, or to how `k` enters the hash SHIFTS THESE COUNTS.
+    // The correct response is to re-measure and re-pin the floors — that is expected
+    // maintenance, NOT a regression, and not grounds for weakening or deleting the
+    // thresholds. What must stay green through such a change is the unconditional
+    // block above; only these two floors are seed-set-specific.
+    REQUIRE (bottomHits > 100);    // measured 525 — floor, not an expectation
+    REQUIRE (topHits > 25);        // measured 68  — floor, not an expectation
     REQUIRE (totalSteps == 12462); // 6 seeds x Σ(n=2..32) (4n-1)
 }
 

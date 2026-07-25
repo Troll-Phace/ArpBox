@@ -376,10 +376,23 @@ Plugin editors (§6.4), plugin manager (scan UI, blocklist), settings (audio/MID
 | MOD A / MOD B | 0–127 | Mod-matrix sources |
 
 ### 12.2 Trig conditions
-`A:B` cycles (1:2, 2:2, 1:4, 2:4, 3:4, 1:8 … pattern-loop-aware), `1ST`, `!1ST`, `FILL`, `!FILL` (FILL = held pad 16), `PRE`, `!PRE` (previous step's result), `NEI`, `!NEI` (neighbor mod lane's result). Conditions gate before probability rolls.
+
+**39 conditions, enumerated exhaustively — no ellipsis.** An earlier revision wrote the A:B set as "1:2, 2:2, 1:4, 2:4, 3:4, 1:8 …", which forced Phase 6 to *infer* where the family ended (issue #62). It does not trail off any more, and it must not be rewritten so that it does.
+
+| Group | Conditions | Count |
+|---|---|---|
+| None | `--` (no condition; the step always passes) | 1 |
+| `A:B` cycles, **B ∈ {2, 4, 8, 16}, A running 1..B** | `1:2 2:2` · `1:4 2:4 3:4 4:4` · `1:8 … 8:8` · `1:16 … 16:16` | 30 |
+| Named | `1ST`, `!1ST`, `FILL`, `!FILL` (FILL = held pad 16), `PRE`, `!PRE` (previous step's result), `NEI`, `!NEI` (neighbor mod lane's result) | 8 |
+
+`A:B` is pattern-loop-aware: it fires on loop A of every B loops of the pattern. B is restricted to the powers of two through 16 — matching the Elektron behaviour this set is modelled on — so there is deliberately **no** :3/:5/:6/:7 family. Conditions gate before probability rolls.
+
+The enumerator order in `engine/sequencer/PatternTypes.h` (`none`, then the A:B block ascending by B, then the named conditions) **is** the serialized ordinal order for the COND lane in §8.1, and it is append-only: new conditions go after `!NEI`, never interleaved. The header pins the current ordinals with `static_assert`s.
 
 ### 12.3 Direction modes
 up, down, up-down (incl. endpoints), up-down (excl.), converge, diverge, outside-in, as-played, walk (±1 brownian), random-no-repeat, spiral.
+
+`walk`'s ±1 reflection is a **per-index hash** — `splitmix64(seed ^ salt ^ k)` for traversal ordinal `k`, not a draw from a running stream — because the traversal table must be a pure function of the index (§1.2, §5.1 L1). A consequence worth knowing before reading its tests: the direction decisions are independent per index rather than a balanced sequence, so for small seeds the endpoint hit counts come out lopsided. That is expected, not a defect; the property tests' thresholds are measured non-vacuity floors (they prove the walk actually moves and actually reflects), not a distributional contract.
 
 ### 12.4 Operators
 

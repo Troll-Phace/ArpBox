@@ -43,7 +43,17 @@ namespace arpbox::engine
 
     Threading: strictly one message thread and one audio thread. `publish` /
     `reclaim` / `peekPending` are message-thread only; `adopt` / `retire` are
-    audio-thread only and RT-safe. */
+    audio-thread only and RT-safe.
+
+    ── HOW THE SPSC CONTRACT IS ENFORCED, NOT JUST STATED (issue #57) ──────────
+    Every method that MUTATES the channel is non-const; every pure observation
+    (`peekPending`, `getNumPendingRetirements`, `getDroppedRetirementCount`) is
+    const. That split is load-bearing: `EngineGraph::patternSnapshots()` hands out
+    a `const PatternChannel&`, so a message-thread caller reaching the graph's
+    channel can observe it but CANNOT compile a call to `adopt`, `retire` or
+    `publish` — the misuse that would create a second producer on the retirement
+    queue or a second consumer on the publish slot. Keep new mutators non-const
+    and new observers const, or that barrier quietly stops holding. */
 class PatternChannel
 {
 public:

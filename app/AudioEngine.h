@@ -40,6 +40,28 @@ namespace arpbox::app
     `EngineSnapshot.deviceStatus` (a level field the audio thread copies into every
     snapshot) — NOT pushed onto `events()`, whose sole producer is the audio thread.
 
+    SAMPLE-RATE CEILING (§11, issue #56): CoreAudio will negotiate whatever the
+    hardware offers, including 384 kHz DXD rates. The sequencer's step-emission
+    invariant only holds below `engine::kMaxSupportedSampleRate` (see that
+    constant for the arithmetic), so every device open here passes through
+    `enforceSampleRateCeiling()`, which down-negotiates to the highest available
+    rate at or below the ceiling — and, if the device offers none, closes it and
+    reports the engine dead rather than running outside the supported envelope.
+    Both outcomes are logged once and surfaced in `getCurrentDeviceDescription()`:
+    a clamped device carries a "(clamped from N kHz …)" suffix, a refused device
+    replaces the readout with an "Unsupported device" line.
+
+    That clamp suffix is a claim about the device that is open RIGHT NOW, so it is
+    remembered against that device's identity and the rate it landed on rather than
+    as a transient flag (issue #68). It therefore survives the asynchronous change
+    broadcast the clamp itself provokes — which re-enters `enforceSampleRateCeiling`
+    a message-queue turn later on a now-compliant device — and it is dropped the
+    moment it stops being true: a different device, a different rate on the same
+    device, or no open device at all. The single case it deliberately over-reports
+    is a user re-selecting, on the same device, exactly the rate we clamped to; the
+    JUCE change broadcast cannot distinguish that from our own clamp, and it
+    describes an identical running configuration.
+
     HARDWARE MIDI INPUT (§9): all available MIDI input devices are enabled and this
     class registers as a `juce::MidiInputCallback`. Each incoming message is
     forwarded (off the MIDI thread) into the graph's shared `MidiMessageCollector`,
@@ -224,6 +246,44 @@ private:
     // MESSAGE-THREAD ONLY: initial device open from persisted state or default.
     void initialiseDevice ();
 
+    // MESSAGE-THREAD ONLY: enforces `engine::kMaxSupportedSampleRate` on the
+    // currently-open device (issue #56). Must be called after EVERY device open or
+    // device-setup change, before the resulting health level is decided.
+    //
+    // Behaviour, in order:
+    //   - no open device: drops the clamp record (it described a device that is no
+    //     longer running) and returns false;
+    //   - rate at or below the ceiling (the overwhelmingly common case): no device
+    //     work, returns false. Keeps the clamp annotation iff the recorded clamp
+    //     still describes this device at this rate, drops it otherwise — the
+    //     compliant rate alone cannot tell "clamped by us" from "never needed a
+    //     clamp", and clearing unconditionally was issue #68;
+    //   - rate above it, and the device offers a rate at or below: ONE
+    //     `setAudioDeviceSetup` attempt at the highest such rate. On success the
+    //     original rate, the resulting rate and the device identity are recorded
+    //     for the readout, and true is returned;
+    //   - rate above it and no supported rate available (or the driver refuses the
+    //     down-negotiation): the device is CLOSED. The caller's status evaluation
+    //     then sees no device and reports `deviceStatusDead`, which is honest — we
+    //     will not render outside the envelope the sequencer's timing bound assumes.
+    //
+    // Terminating by construction: at most one re-setup attempt per call, and the
+    // outcome is re-read from the device rather than assumed, so the change
+    // broadcast this may provoke re-enters to a no-op (or to a closed device).
+    //
+    /** Clamps the open device to the supported sample-rate ceiling. */
+    bool enforceSampleRateCeiling ();
+
+    // MESSAGE-THREAD ONLY: is the recorded clamp still a true statement about
+    // `device` as it is running right now (same device, same clamped-to rate)?
+    /** True while the "(clamped from …)" annotation still describes this device. */
+    bool clampStillApplies (juce::AudioIODevice& device) const;
+
+    // MESSAGE-THREAD ONLY: drop the clamp record (and with it the readout suffix).
+    // Leaves `refusedSampleRate` alone — that annotation has its own lifetime.
+    /** Forgets any recorded sample-rate clamp. */
+    void forgetClamp () noexcept;
+
     // MESSAGE-THREAD ONLY: reopen the default output device and set the resulting
     // status level (fell-back or dead). Guarded by `fallbackInProgress`.
     void performFallback ();
@@ -268,6 +328,27 @@ private:
     // the fallback's own change broadcast) clears the stale FellBackToDefault banner
     // (issue #10). Empty when no fallback has occurred.
     juce::String fallbackDeviceName;
+
+    // MESSAGE-THREAD ONLY: sample-rate-ceiling annotations for the device readout
+    // (issue #56). All are zero/empty in the normal case, and the clamp record and
+    // `refusedSampleRate` are never both live at once.
+    //
+    // The clamp is recorded against the DEVICE it applied to, not as a bare flag
+    // (issue #68): `enforceSampleRateCeiling` is re-entered by the clamp's own async
+    // change broadcast, at which point the rate is compliant and a flag alone would
+    // read as "no clamp needed" and self-clear after one message-queue turn. The
+    // device key plus the clamped-to rate is what makes the annotation checkable
+    // against reality instead of assumed — see `clampStillApplies`.
+    //
+    //   clampedFromSampleRate — rate CoreAudio negotiated before we down-negotiated
+    //   clampedToSampleRate   — rate the device actually landed on
+    //   clampedDeviceKey      — "<typeName>/<deviceName>" of the clamped device
+    //   refusedSampleRate     — rate of a device we CLOSED because it offered
+    //                           nothing at or below the ceiling
+    double clampedFromSampleRate { 0.0 };
+    double clampedToSampleRate { 0.0 };
+    juce::String clampedDeviceKey;
+    double refusedSampleRate { 0.0 };
 
     // Cached, message-thread-only readout of the active device.
     juce::String deviceDescription { "No audio device" };

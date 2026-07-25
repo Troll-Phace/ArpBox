@@ -14,6 +14,11 @@
 
 namespace arpbox::engine
 {
+/** What one step boundary contributes to the output. Defined at namespace scope
+    BELOW `SequencerProcessor` (it names the class's documented defaults) and
+    forward-declared here so `emitStep` can take it by reference. */
+struct StepEmission;
+
 /** The ARP ENGINE node (ARCHITECTURE §3.3 "[ARP ENGINE node]", §4 step 4). A
     MIDI-only `AudioProcessor` sitting between the MIDI-in node and the hosted synth:
     `Transport → MidiIn → Seq → Synth → Master`.
@@ -22,8 +27,10 @@ namespace arpbox::engine
     Four things, and deliberately nothing else:
 
       1. The step-boundary WALK (below) — buffer-size independent, stateless.
-      2. `describeStep()` — the L1 pattern-core read: the adopted `PatternSnapshot`'s
-         GATE / PITCH / OCT / VEL / LEN lanes resolved for one global step index.
+      2. `evaluateStep()` — the L1 pattern-core read, a FREE FUNCTION declared below
+         this class: the `PatternSnapshot`'s GATE / PITCH / OCT / VEL / LEN lanes
+         resolved for one global step index. It is not a member, deliberately; see
+         "THE PURITY OF THE EMISSION CORE IS STRUCTURAL".
       3. The quantized PATTERN SWITCH (`queuePatternSwitch`), which is why this class
          is an `ICommandSink`.
       4. Note-off ownership via `SoundingNoteTable` (§5.5).
@@ -31,7 +38,7 @@ namespace arpbox::engine
     Still absent on purpose: step logic (PROB/COND/RATCHET/MICRO — Phase 7), the
     operator stack and constraint gate (§5.1 L3, Phase 12+), and the live note pool
     (Phase 8; Phase 6 reads the snapshot's stub pool). The remaining six lanes are
-    STORED in the snapshot and simply not read yet — see `describeStep`.
+    STORED in the snapshot and simply not read yet — see `evaluateStep`.
 
     ── THE STEP WALK, AND WHY IT IS BUFFER-SIZE INDEPENDENT ────────────────────
     Nothing about "where are we in the pattern" is stored in this object. There is no
@@ -184,21 +191,44 @@ namespace arpbox::engine
          block when the adopt point is exactly the next block's head (the offset-0
          case). See both for the one residual, documented exception.
 
-    WHAT MAKES THE LOOKAHEAD LEGITIMATE, AND WHAT PHASE 7 MUST NOT BREAK:
-    `describeStep` is a PURE function of the global step index. That is what lets
-    this node evaluate step k+1, k+2, … out of order with no cursor, no accumulator
-    and no side effect — and it is the same property §9's offline MIDI drag-out
-    depends on to render bit-identically to real time.
+    ── THE PURITY OF THE EMISSION CORE IS STRUCTURAL (issue #53) ───────────────
+    WHAT MAKES THE LOOKAHEAD LEGITIMATE: deciding what step k+1, k+2, … will emit
+    must give the same answer as eventually emitting them. That holds only while
+    the emission core is a PURE function of (snapshot, pattern index, step index) —
+    no cursor, no accumulator, no cache, no side effect. It is the same property
+    §9's offline MIDI drag-out depends on to render bit-identically to real time.
 
-    PHASE 7.1 ADDS PROB AND COND (§12.2) TO `describeStep`. The lookahead stays
-    correct ONLY while the result remains a pure function of the step index — i.e.
-    while the probability roll is drawn from a seeded stream keyed by (step index,
-    seed) rather than from a running per-step RNG cursor. §5.2's seed composition
-    already requires exactly that, so this is a constraint to HONOUR, not a new one
-    to invent. A COND whose result depends on the previous step's outcome (`PRE`,
-    `NEI`) stays fine as long as that outcome is itself re-derivable from the index.
-    If a future step's emission ever becomes cursor-dependent, this lookahead must be
-    deleted, not patched — a mispredicted cutoff is a wrong note length.
+    UNTIL ISSUE #53 THAT WAS A COMMENT. IT IS NOW THE SIGNATURE. The core is
+    `evaluateStep (const PatternSnapshot&, int patternIndex, std::int64_t)`, a FREE
+    FUNCTION at namespace scope — declared below this class, defined in
+    SequencerProcessor.cpp. It is not a member, not a static member, and not a
+    friend, so EVERY piece of `SequencerProcessor` state is unreachable from it:
+    `transport`, `activeSnapshot`, `activePatternIndex`, the pending-switch fields,
+    and any member a later phase adds. The three legal inputs arrive as parameters
+    and there is no fourth channel. This class holds no member that describes a
+    step; there is nowhere to put a cursor that the core could read.
+
+    WHAT NOW FAILS IF PHASE 7.1 REACHES FOR ONE. Writing the natural impurity —
+    an RNG cursor / a `PRE` cache held as a member and read while evaluating —
+    does not compile: a free function cannot name a class member, and the fix a
+    compiler suggests (make it a member again) is a review-visible reversal of this
+    note, not a silent edit. Widening the SIGNATURE to carry mutable state is still
+    physically possible, which is why the compile-time half is backed by a
+    behavioural half: tests/step_purity.cpp calls `evaluateStep` reversed, repeated,
+    shuffled and interleaved across patterns and requires every result to equal the
+    in-order reference. A cursor, an accumulator or a memo — wherever it is
+    parked, including a file-scope static in the .cpp that the type system cannot
+    see — reddens that test.
+
+    PHASE 7.1 ADDS PROB AND COND (§12.2) TO `evaluateStep`. Both stay legal here:
+    the probability roll must be drawn from a seeded stream keyed by (step index,
+    seed) rather than from a running per-step RNG cursor, which is what §5.2's seed
+    composition already requires. A COND whose result depends on the previous step's
+    outcome (`PRE`, `NEI`) is fine as long as that outcome is RE-DERIVED from the
+    index inside the call rather than read from a cache the emitting walk filled.
+    If a future step's emission ever genuinely becomes cursor-dependent, this
+    lookahead must be DELETED, not patched — a mispredicted cutoff is a wrong note
+    length, and #36/#46/#48's buffer-size-dependent class returns one level up.
 
     FLUSH POINTS handled here — after any of them the table is empty:
       - `Transport::stoppedThisBlock()` — the primary trigger. Latched edge, visible
@@ -256,7 +286,7 @@ public:
     // and lifecycle tests are written against them. They are kept as the NAMES of
     // the default configuration, and a later task renames them accordingly. The
     // live values now come from the adopted `PatternSnapshot`; nothing in
-    // `describeStep` reads the constants below.
+    // `evaluateStep` reads the constants below.
 
     /** Default pattern length in steps (every lane's default `length`). */
     static constexpr int scaffoldNumSteps = 16;
@@ -389,32 +419,6 @@ public:
     void applyCommand (const EngineCommand& command) noexcept override;
 
 private:
-    /** What one step boundary contributes to the output.
-        ─── THE PIPELINE SEAM ──────────────────────────────────────────────────
-        `describeStep()` is the ONE function each pipeline phase grows. Phase 6 filled
-        it with L0+L1 (note pool → pattern core lanes); Phase 7 adds L2 (probability,
-        trig conditions, ratchets, micro-timing), Phase 12+ adds L3 (the operator
-        stack) and the constraint gate, and the return type grows into a small LIST of
-        emissions each carrying a provenance bitmask (§5.4). The step WALK and the MIDI
-        EMISSION either side of it do not change: that is the point of splitting them
-        here. `gateFractionOfStep` is shaped like the LEN lane (§12.1: 1–400% of the
-        step, >100% meaning tie/legato). */
-    struct StepEmission
-    {
-        bool gate = false;                                ///< False ⇒ this step emits nothing.
-        int channel = scaffoldChannel;                    ///< MIDI channel, 1..16.
-        int note = scaffoldRootNote;                      ///< MIDI note number, 0..127.
-        int velocity = scaffoldVelocity;                  ///< 1..127.
-        double gateFractionOfStep = scaffoldGateFraction; ///< LEN, as a fraction of one step.
-    };
-
-    // RT-SAFE: audio thread. PURE FUNCTION of the global step index (plus the adopted
-    // snapshot and the active pattern, both fixed for the whole block) — no cursor, no
-    // per-step mutable state, so it cannot drift and is trivially reproducible offline
-    // (§9 MIDI drag-out runs this same code path). THE PIPELINE SEAM: see StepEmission.
-    /** Decides what global step `stepIndex` emits. */
-    StepEmission describeStep (std::int64_t stepIndex) const noexcept;
-
     /** Hard ceiling on how many steps `cutoffForSamePitch` may look ahead.
         DERIVED, not chosen: §12.1 caps LEN at 400% of the step, so a note can
         overlap at most four following steps, and one more absorbs the ±1 sample of
@@ -448,11 +452,12 @@ private:
     // BOUNDED: it scans forward only while the note is still sounding
     // (`boundary <= naturalDueSample`), so the loop runs ~ceil(LEN%) times and is
     // additionally capped at `maxRetriggerLookaheadSteps`. It stops short of a
-    // RESOLVED pattern switch, because `describeStep` would describe those steps
-    // under the OUTGOING pattern — the switch's own flush releases the note there.
+    // RESOLVED pattern switch, because `evaluateStep` would be called with the
+    // OUTGOING pattern index for steps the INCOMING pattern will play — the
+    // switch's own flush releases the note there.
     //
-    // VALID ONLY BECAUSE `describeStep` IS PURE — see the Phase 7.1 constraint in
-    // the class comment before adding anything cursor-dependent to it.
+    // VALID ONLY BECAUSE `evaluateStep` IS PURE — see "THE PURITY OF THE EMISSION
+    // CORE IS STRUCTURAL" in the class comment before changing its signature.
     std::int64_t cutoffForSamePitch (std::int64_t stepIndex,
                                      int channel,
                                      int note,
@@ -560,4 +565,55 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SequencerProcessor)
 };
+
+/** What one step boundary contributes to the output.
+
+    ─── THE PIPELINE SEAM ──────────────────────────────────────────────────────
+    `evaluateStep()` below is the ONE function each pipeline phase grows. Phase 6
+    filled it with L0+L1 (note pool → pattern core lanes); Phase 7 adds L2
+    (probability, trig conditions, ratchets, micro-timing), Phase 12+ adds L3 (the
+    operator stack) and the constraint gate, and this return type grows into a
+    small LIST of emissions each carrying a provenance bitmask (§5.4). The step
+    WALK and the MIDI EMISSION either side of it do not change: that is the point
+    of splitting them here. `gateFractionOfStep` is shaped like the LEN lane
+    (§12.1: 1–400% of the step, >100% meaning tie/legato).
+
+    The non-`gate` fields carry the documented defaults purely so a
+    default-constructed value is well formed; `gate == false` means the step emits
+    nothing and `emitStep` reads none of them. */
+struct StepEmission
+{
+    bool gate = false;                                                    ///< False ⇒ this step emits nothing.
+    int channel = SequencerProcessor::scaffoldChannel;                    ///< MIDI channel, 1..16.
+    int note = SequencerProcessor::scaffoldRootNote;                      ///< MIDI note number, 0..127.
+    int velocity = SequencerProcessor::scaffoldVelocity;                  ///< 1..127.
+    double gateFractionOfStep = SequencerProcessor::scaffoldGateFraction; ///< LEN, as a fraction of one step.
+};
+
+// RT-SAFE: audio thread. Allocation-free, lock-free, branch-predictable table reads.
+//
+// ── THE PURE EMISSION CORE (issue #53) ───────────────────────────────────────
+// A FREE FUNCTION ON PURPOSE, and the purpose is enforcement rather than tidiness.
+// The retrigger lookahead (`SequencerProcessor::cutoffForSamePitch`) predicts what
+// steps k+1, k+2, … will emit and schedules a note-off from the prediction; the
+// prediction is only sound while evaluating a step is a pure function of the three
+// parameters below. Expressing that as a comment on a member function is what
+// issue #53 was filed about. Expressed as a free function it is checked by the
+// compiler: there is no `this`, so no member of `SequencerProcessor` — present or
+// future, mutable or not — is nameable here.
+//
+// THE WHOLE CONTRACT, and nothing may be added to either side of it:
+//   inputs  = (snapshot, patternIndex, stepIndex). Nothing else. No transport, no
+//             block, no cursor, no bar counter passed by a side channel.
+//   outputs = the returned value. Nothing else. No stored state, no cache primed
+//             for the next call, no RNG stream advanced as a side effect.
+// Same three inputs ⇒ same result, on any thread, in any order, any number of
+// times, in real time or in §9's offline drag-out pass. tests/step_purity.cpp
+// requires exactly that of whatever this function grows into.
+//
+// @param snapshot      The adopted pattern set. Never null (the callers null-check).
+// @param patternIndex  Which of the 16 patterns is playing; clamped by `pattern()`.
+// @param stepIndex     The GLOBAL step index — it keeps counting across loops.
+/** Decides what global step `stepIndex` of `patternIndex` emits. */
+StepEmission evaluateStep (const PatternSnapshot& snapshot, int patternIndex, std::int64_t stepIndex) noexcept;
 } // namespace arpbox::engine

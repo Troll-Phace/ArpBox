@@ -53,8 +53,10 @@
 #include "support/SequencerRenderRig.h"
 
 #include "engine/graph/EngineCommand.h"
+#include "engine/graph/EngineGraph.h"
 #include "engine/graph/Transport.h"
 #include "engine/midi/NotePool.h"
+#include "engine/sequencer/PatternTypes.h"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -62,9 +64,12 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 using arpbox::engine::EngineCommandType;
+using arpbox::engine::LaneId;
+using arpbox::engine::maxSteps;
 using arpbox::engine::PoolSnapshot;
 using arpbox::engine::Transport;
 using arpbox::testing::engineCommand;
@@ -90,6 +95,25 @@ constexpr std::int64_t retrigStepSamples = 1200;
 
 /** The gate at the default LEN of 50 %: 1200 / 2 = 600, exactly. */
 constexpr std::int64_t retrigGateSamples = 600;
+
+// ── THE SECOND BRANCH: LEN > 100 % (issue #65, refs #46) ─────────────────────
+// Everything above configures the ALREADY-DUE branch. A 50 % gate ends 600 samples
+// into a 1200-sample step, so by the time the pitch returns the outgoing note has
+// ALWAYS expired — `cutoffForSamePitch` breaks out immediately on
+// `boundary > naturalDueSample` and the STILL-SOUNDING branch is never entered.
+// These constants configure the twin case, where the note is still live when its
+// own pitch comes round again.
+
+/** LEN as a percentage of the step (§12.1 allows 1..400). 150 % ⇒ tie/legato. */
+constexpr int retrigTiedLenPercent = 150;
+
+/** The NATURAL end of a 150 % gate: llround (1.5 x 1200) = 1800, exactly. Beyond the
+    1200-sample step, which is what makes the note still sounding at the retrigger. */
+constexpr std::int64_t retrigTiedNaturalSamples = 1800;
+
+/** Where `cutoffForSamePitch` actually places that note's off: §5.5's 1-sample gap
+    before the next same-pitch onset, on the ABSOLUTE timeline — `1200 - 1`. */
+constexpr std::int64_t retrigCutoffOffset = 1199;
 
 /** lcm (32, 64, 96, 128, 256, 480, 512, 1024, 2048, 4096) = 2^12 x 3 x 5. Every
     swept block size divides it, so a command scheduled on a multiple of it lands on
@@ -149,6 +173,39 @@ void configureRecurrenceBeyondTheGate (SequencerRig& rig)
     rig.patternDocument.setGrid (retrigGridStepPpq);
 }
 
+/** Fills pattern 0's `lane` with one value across every storage slot, so no step of
+    the sweep can be reading a default the case did not choose. */
+void fillLane (SequencerRig& rig, LaneId lane, int value)
+{
+    for (int step = 0; step < maxSteps; ++step)
+        rig.patternDocument.setLaneValue (0, lane, step, value);
+}
+
+/** THE STILL-SOUNDING POSITIVE (issue #65): the same single-note pool and 1/32 grid
+    as `configureSamePitchOnEveryStep`, with LEN raised to 150 %. The natural end at
+    1800 samples now falls PAST the next same-pitch onset at 1200, so
+    `cutoffForSamePitch` has to shorten the note — the branch #46 lived in. */
+void configureStillSoundingSamePitch (SequencerRig& rig)
+{
+    rig.patternDocument.beginTransaction ();
+    configureSamePitchOnEveryStep (rig);
+    fillLane (rig, LaneId::len, retrigTiedLenPercent);
+    rig.patternDocument.endTransaction ();
+}
+
+/** THE NEGATIVE CONTROL FOR THE STILL-SOUNDING BRANCH: LEN 150 % over the DEFAULT
+    8-note pool, so a pitch recurs only every 8 steps = 9600 samples — far beyond the
+    1800-sample gate. Every note reaches its natural end, no lookahead can fire, and
+    the cutoff counter must read 0. This is what proves the counter measures the
+    branch rather than firing on any tied render. */
+void configureStillSoundingWideRecurrence (SequencerRig& rig)
+{
+    rig.patternDocument.beginTransaction ();
+    rig.patternDocument.setGrid (retrigGridStepPpq);
+    fillLane (rig, LaneId::len, retrigTiedLenPercent);
+    rig.patternDocument.endTransaction ();
+}
+
 /** Tempo + play at sample 0, stop at the end of the play span. Every sample here is
     a multiple of `blockAlignmentUnit`, hence a block head at every swept size.
 
@@ -187,6 +244,64 @@ std::vector<TimedMidiEvent> noteOnsOf (const MidiRenderResult& render)
 std::vector<TimedMidiEvent> noteOffsOf (const MidiRenderResult& render)
 {
     return render.select ([] (const TimedMidiEvent& event) { return event.message.isNoteOff (); });
+}
+
+// ── THE BRANCH CLASSIFIER (issue #65) ────────────────────────────────────────
+
+/** Which same-pitch retrigger branch produced each note-off, read off the emitted
+    stream rather than out of the engine — so it stays an independent observation and
+    not a second copy of the fix.
+
+    THE TWO BRANCHES HAVE DISJOINT ABSOLUTE-SAMPLE SIGNATURES, because
+    `cutoffForSamePitch` places a still-sounding cutoff at `next same-pitch on - 1`
+    while a note that simply expired sits at its natural gate end:
+
+        LEN  50 %   natural end = on +  600   ⇒  sample % 1200 ==  600
+        LEN 150 %   natural end = on + 1800   ⇒  sample % 1200 ==  600   (1800 - 1200)
+        either      still-sounding cutoff     ⇒  sample % 1200 == 1199
+
+    A note-off at residue 1199 is therefore producible by NOTHING ELSE in these
+    configurations, which is what makes `cutoff` an honest reachability counter for
+    the still-sounding branch — and what lets the ALREADY-DUE case assert it reads
+    ZERO, stating that case's scope limit executably instead of in prose.
+
+    The stop flush lands on neither residue (122880 % 1200 == 480), so it is counted
+    on its own and can never inflate either arm. Anything else is `other`, which must
+    stay 0 or the classification itself has stopped describing the stream. */
+struct RetriggerBranchTally
+{
+    int cutoff = 0;    ///< Offs only `cutoffForSamePitch`'s still-sounding branch emits.
+    int natural = 0;   ///< Offs at the note's own natural gate end.
+    int stopFlush = 0; ///< Offs from the terminating stop's flush.
+    int other = 0;     ///< Anything unaccounted for — must be 0.
+
+    [[nodiscard]] std::string describe () const
+    {
+        return "cutoff-shaped " + std::to_string (cutoff) + ", natural-shaped " + std::to_string (natural) +
+               ", stop-flush " + std::to_string (stopFlush) + ", unclassified " + std::to_string (other);
+    }
+};
+
+RetriggerBranchTally classifyNoteOffs (const MidiRenderResult& render)
+{
+    RetriggerBranchTally tally;
+
+    // No Catch2 macros in here (house rule): count, return, assert at the call site.
+    for (const auto& off : noteOffsOf (render))
+    {
+        const std::int64_t residue = off.absoluteSample % retrigStepSamples;
+
+        if (off.absoluteSample == playSpanSamples)
+            ++tally.stopFlush;
+        else if (residue == retrigCutoffOffset)
+            ++tally.cutoff;
+        else if (residue == retrigGateSamples)
+            ++tally.natural;
+        else
+            ++tally.other;
+    }
+
+    return tally;
 }
 
 // ── THE REACHABILITY COUNTER ─────────────────────────────────────────────────
@@ -430,6 +545,201 @@ TEST_CASE ("determinism/retrigger: an already-due note-off keeps its true sample
     REQUIRE (control.noteOns == expectedNoteOns); // the control really played, too
     REQUIRE (control.blocksWithRetrigger == 0);
     REQUIRE (control.retriggerPairs == 0);
+
+    // ── 8. THE SCOPE LIMIT, STATED EXECUTABLY (issue #65) ────────────────────
+    // THIS CASE COVERS ONE OF THE TWO SAME-PITCH RETRIGGER BRANCHES. A 50 % gate ends
+    // 600 samples into a 1200-sample step, so the outgoing note has ALWAYS expired by
+    // the time its pitch returns and `cutoffForSamePitch` breaks out immediately on
+    // `boundary > naturalDueSample`. The STILL-SOUNDING branch is unreachable from
+    // here — structurally, not by accident.
+    //
+    // THAT IS WHY #46 SURVIVED #36's FIX: #46 is this defect's twin on the branch
+    // this configuration cannot enter, and the guard written for #36 was incapable of
+    // catching it. A reader who took "sequencer_retrigger.cpp is green" to mean the
+    // retrigger policy was guarded would have been wrong in exactly that way.
+    //
+    // So the limit is asserted rather than described: every note-off here is a
+    // natural gate end or the stop flush, and NONE carries the cutoff signature. The
+    // case below covers the other branch.
+    const auto tally = classifyNoteOffs (renderRetrigger (reachabilityBlockSize, configureSamePitchOnEveryStep));
+    INFO ("already-due branch: " << tally.describe ());
+    REQUIRE (tally.natural == expectedNoteOns - 1); // 102 gate ends...
+    REQUIRE (tally.stopFlush == 1);                 // ...plus the terminating flush
+    REQUIRE (tally.other == 0);                     // the classification really describes the stream
+    REQUIRE (tally.cutoff == 0);                    // THE SCOPE LIMIT
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #65 / #46 — THE OTHER BRANCH: the note is STILL SOUNDING
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/retrigger: a still-sounding same-pitch note is cut one sample before the retrigger at every "
+           "block size",
+           "[midi-conformance][determinism]")
+{
+    // ── WHY THIS CASE EXISTS ALONGSIDE ITS INTEGRATION TWIN ──────────────────
+    // `sequencer_offdeterminism.cpp` case B already covers this branch, and covers it
+    // well — block-head asymmetry, byte-identical sweep, the 1199 literal. This case
+    // is not that check repeated. It is the branch-REACHABILITY half, living in the
+    // file that owns the retrigger policy, so the two same-pitch branches are
+    // guarded side by side under one classifier and neither can be mistaken for the
+    // other's coverage. The case above asserts that classifier reads 0; this one
+    // asserts it fires.
+    //
+    // ── THE CONFIGURATION, AND WHY IT REACHES THE BRANCH ─────────────────────
+    // Identical to the case above except LEN, which goes from 50 % to 150 %:
+    //
+    //     step          1200 samples   (1/32 @ 300 BPM / 48 kHz)
+    //     natural end   1800 samples   (llround (1.5 x 1200)) — PAST the next step
+    //     cutoff        1199 samples   (next same-pitch on - 1, §5.5's 1-sample gap)
+    //
+    // 1800 > 1200 is the whole point: the note is still live when its own pitch comes
+    // round, so `cutoffForSamePitch`'s lookahead must shorten it. At 50 % it could not.
+    REQUIRE (retrigTiedNaturalSamples == static_cast<std::int64_t> (std::llround (
+                                             0.01 * retrigTiedLenPercent * static_cast<double> (retrigStepSamples))));
+    REQUIRE (retrigTiedNaturalSamples > retrigStepSamples); // STILL SOUNDING at the retrigger
+    REQUIRE (retrigCutoffOffset == retrigStepSamples - 1);  // §5.5's 1-sample gap
+    REQUIRE (retrigCutoffOffset != retrigTiedNaturalSamples);
+    REQUIRE (retrigCutoffOffset != retrigGateSamples); // and distinct from the 50 % end
+
+    // Same grid, same span, so the note-on count is the one already derived above.
+    REQUIRE (playSpanSamples / retrigStepSamples == 102);
+    REQUIRE (expectedNoteOns == 103);
+
+    // ── THE SWEEP ────────────────────────────────────────────────────────────
+    // A single block size cannot verify this. At 4096 no step boundary is ever a
+    // block head, so `on - 1` always sits in the same block as the retrigger and the
+    // pre-#46 placement would look correct. At 32 every EVEN boundary is a head, and
+    // the cutoff sample belongs to the PREVIOUS block — the placement `jmax (0,
+    // offset - 1)` structurally could not express. The disagreement between those two
+    // ends IS the defect, so both must be rendered and compared.
+    //
+    // No Catch2 macros inside the loop (house rule): aggregate, then assert.
+    MidiRenderResult reference;
+    std::vector<std::uint8_t> referenceBytes;
+
+    int sizesSwept = 0;
+    int sizesMatchingReference = 0;
+    int sizesWithFullCutoffTally = 0;
+    int sizesWithAnyNaturalOff = 0;
+    int sizesWithCorrectOnGrid = 0;
+    int sizesWithCorrectOffGrid = 0;
+    int sizesBalanced = 0;
+    int boundariesThatAreBlockHeads32 = 0;
+    int boundariesThatAreBlockHeads4096 = 0;
+    std::string firstOffender;
+
+    for (const int blockSize : sweptBlockSizes)
+    {
+        ++sizesSwept;
+
+        const auto render = renderRetrigger (blockSize, configureStillSoundingSamePitch);
+        const auto ons = noteOnsOf (render);
+        const auto offs = noteOffsOf (render);
+        const auto tally = classifyNoteOffs (render);
+
+        // 102 cutoffs (steps 0..101) + 1 stop-flush off for the last note.
+        if (tally.cutoff == expectedNoteOns - 1 && tally.stopFlush == 1 && tally.other == 0)
+            ++sizesWithFullCutoffTally;
+        else if (firstOffender.empty ())
+            firstOffender = "block " + std::to_string (blockSize) + ": " + tally.describe ();
+
+        // The natural 1800-sample end must NEVER be reached: every note but the last
+        // is cut short. A non-zero count here means the lookahead did not fire.
+        if (tally.natural > 0)
+            ++sizesWithAnyNaturalOff;
+
+        // ABSOLUTE LITERALS, not a formula re-derived from the node.
+        int onsAtGrid = 0;
+        int offsAtCutoff = 0;
+
+        for (std::size_t i = 0; i < ons.size (); ++i)
+        {
+            const auto expectedOn = static_cast<std::int64_t> (i) * retrigStepSamples;
+            onsAtGrid += (ons[i].absoluteSample == expectedOn && ons[i].message.getNoteNumber () == retrigPitch &&
+                          ons[i].message.getChannel () == retrigChannel)
+                             ? 1
+                             : 0;
+
+            const bool isLast = (i + 1 == ons.size ());
+            const auto expectedOff = isLast ? playSpanSamples : expectedOn + retrigCutoffOffset;
+
+            if (i < offs.size ())
+                offsAtCutoff += (offs[i].absoluteSample == expectedOff) ? 1 : 0;
+        }
+
+        if (static_cast<int> (ons.size ()) == expectedNoteOns && onsAtGrid == expectedNoteOns)
+            ++sizesWithCorrectOnGrid;
+
+        if (static_cast<int> (offs.size ()) == expectedNoteOns && offsAtCutoff == expectedNoteOns)
+            ++sizesWithCorrectOffGrid;
+
+        NoteLifecycleTracker tracker;
+        tracker.observeAll (render);
+
+        if (tracker.noteOnsSeen () == expectedNoteOns && tracker.orphanNoteOffs () == 0 && tracker.balanced () &&
+            render.isSampleSorted () && render.numSamples == renderSpanSamples)
+            ++sizesBalanced;
+
+        if (reference.empty ())
+        {
+            reference = render;
+            referenceBytes = render.toByteStream ();
+        }
+        else if (render == reference && render.toByteStream () == referenceBytes)
+        {
+            ++sizesMatchingReference;
+        }
+        else if (firstOffender.empty ())
+        {
+            firstOffender = "block " + std::to_string (blockSize) + " differs from the 32-sample reference";
+        }
+    }
+
+    // How asymmetric the sweep really is — the mechanism, made visible. Counted from
+    // arithmetic alone, so it holds whatever the engine did.
+    for (int step = 0; step + 1 < expectedNoteOns; ++step)
+    {
+        const std::int64_t nextOn = static_cast<std::int64_t> (step + 1) * retrigStepSamples;
+        boundariesThatAreBlockHeads32 += (nextOn % 32 == 0) ? 1 : 0;
+        boundariesThatAreBlockHeads4096 += (nextOn % 4096 == 0) ? 1 : 0;
+    }
+
+    INFO ("first offender: " << (firstOffender.empty () ? "none" : firstOffender));
+    INFO ("swept " << sizesSwept << " sizes; retrigger boundaries that are block heads — at 32: "
+                   << boundariesThatAreBlockHeads32 << ", at 4096: " << boundariesThatAreBlockHeads4096);
+
+    REQUIRE (sizesSwept == 10);
+    REQUIRE (sizesWithCorrectOnGrid == 10);
+    REQUIRE (sizesWithCorrectOffGrid == 10);
+    REQUIRE (sizesBalanced == 10);
+
+    // ── THE REACHABILITY ASSERTION (issue #65) ───────────────────────────────
+    // The counter the case above requires to read 0 must read 102 here, at EVERY
+    // block size. This is the still-sounding branch, entered.
+    REQUIRE (sizesWithFullCutoffTally == 10);
+    REQUIRE (sizesWithAnyNaturalOff == 0);
+
+    // ── THE DETERMINISM COMPARISON (§1.2) ────────────────────────────────────
+    REQUIRE (! referenceBytes.empty ());
+    REQUIRE (sizesMatchingReference == 9); // all nine against the 32-sample reference
+
+    // Non-vacuity for the sweep's asymmetry: the two ends genuinely disagree about
+    // which retrigger boundaries are block heads, so the equality above is a claim.
+    REQUIRE (boundariesThatAreBlockHeads32 > 0);
+    REQUIRE (boundariesThatAreBlockHeads4096 == 0);
+
+    // ── THE NEGATIVE CONTROL ─────────────────────────────────────────────────
+    // LEN 150 % over the default 8-note pool: a pitch recurs every 8 steps (9600
+    // samples), far beyond the 1800-sample gate, so no lookahead can fire. The cutoff
+    // counter must collapse to 0 and the natural end must be what is heard — which is
+    // what proves the counter measures the branch and not merely "a tied render".
+    const auto control =
+        classifyNoteOffs (renderRetrigger (reachabilityBlockSize, configureStillSoundingWideRecurrence));
+    INFO ("wide-recurrence control: " << control.describe ());
+    REQUIRE (control.natural > 0); // the control really played, and played to its natural end
+    REQUIRE (control.other == 0);
+    REQUIRE (control.cutoff == 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -449,7 +759,8 @@ TEST_CASE ("sequencer/snap-window: the step-index snap stays under one sample at
     //     length, so a whole-bar grid would blow straight through one sample), or
     //   • applies a lane clock DIVISION to the walk itself rather than to lane
     //     indexing (which would multiply the effective step length the snap sees), or
-    //   • raises the supported sample rate ceiling (see the note on that below).
+    //   • raises `engine::kMaxSupportedSampleRate`, the enforced ceiling this case
+    //     reads directly (issue #56 — see the note on that below).
     //
     // The window is NOT a fixed number of samples. It is `stepIndexSnapSteps` STEPS,
     // so its width in samples is:
@@ -477,17 +788,34 @@ TEST_CASE ("sequencer/snap-window: the step-index snap stays under one sample at
         1.0,   1.0 * 2.0 / 3.0,   1.0 * 1.5    // 1/4  (dotted quarter = 1.5, the coarsest)
     };
 
-    // THE SAMPLE-RATE CEILING IS AN ASSUMPTION, NOT A CODE FACT. Nothing in ARPBOX
-    // caps the rate: app/AudioEngine.cpp opens the device through
-    // AudioDeviceManager::initialise / initialiseWithDefaultDevices and adopts
-    // whatever CoreAudio negotiates (the only sample-rate guards in the tree are
-    // non-positive floors substituting 44100 — Transport.cpp, EngineGraph.cpp,
-    // SynthSlot.cpp). 192 kHz is the highest rate mainstream interfaces offer and the
-    // rate the header's worst-case row is quoted at. NOTE THE CONSEQUENCE, because it
-    // is the interesting half: at 384 kHz the worst case would be 1.728 samples and
-    // this bound would BREAK. That is a real (if narrow) exposure, not a test
-    // artefact — see the finding filed alongside this test.
-    constexpr double assumedMaxSampleRate = 192000.0;
+    // ── THE SAMPLE-RATE CEILING IS NOW A CODE FACT (issue #56) ───────────────
+    // This used to read "an assumption, not a code fact": nothing capped the rate, so
+    // the bound below rested on 192 kHz being the highest rate mainstream interfaces
+    // offer, and at 384 kHz — not hypothetical, DXD interfaces exist and CoreAudio
+    // will negotiate them — the worst case would have been 1.728 samples and this
+    // bound would have BROKEN. That exposure is what #56 was filed for, and #56
+    // closed it.
+    //
+    // The ceiling is now `engine::kMaxSupportedSampleRate`, enforced by
+    // `app::AudioEngine::enforceSampleRateCeiling()` on all three device-open paths:
+    // a device negotiating above it is down-negotiated to the highest available rate
+    // at or below it, and closed outright if it offers none. So the 0.864-sample
+    // worst case asserted below is a REAL BOUND on what the engine can be handed,
+    // not a hope about what hardware people own.
+    //
+    // KEYED OFF THE CONSTANT, NOT A COPY OF IT. The constant lives in
+    // engine/graph/EngineGraph.h — deliberately engine-side rather than in app/, so
+    // tests can reach it without depending on the app target. Raising it therefore
+    // recomputes `worstWindow` here and REDDENS this case, instead of leaving the
+    // test quietly checking a number the product no longer honours. That is the whole
+    // point of #56: the bound was only ever as good as an assumption nobody enforced,
+    // and now the test and the enforcement point at the same symbol.
+    constexpr double assumedMaxSampleRate = arpbox::engine::kMaxSupportedSampleRate;
+
+    // The literal the rows below are quoted at, asserted against the constant rather
+    // than assumed equal to it — this is what turns a raised ceiling into a red test
+    // here rather than into silently stale reference rows.
+    REQUIRE (assumedMaxSampleRate == 192000.0);
 
     // The window formula, once. Comparisons use `Catch::Approx` with an absolute
     // margin rather than `==`: these are derived doubles (1e-6 and 60/20 are both

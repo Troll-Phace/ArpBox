@@ -99,14 +99,31 @@ enum class QuantizeMode : std::uint8_t
     strip are complete, but the step tick ignores the lane until Phase 7.1 lands
     the condition gate (and the RNG infrastructure the probability roll needs).
 
-    ── THE A:B SET ─────────────────────────────────────────────────────────────
-    §12.2 enumerates "1:2, 2:2, 1:4, 2:4, 3:4, 1:8 …" — B ascending through the
-    powers of two 2, 4, 8, with A running 1..B, and no :3/:5/:6/:7 family. That
-    reading is taken literally here: 2 + 4 + 8 = 14 A:B entries. `A:B` fires on
-    loop A of every B pattern loops (§12.2 "pattern-loop-aware"). Should the odd
-    divisors be wanted later, APPEND them after `notNei` — do not interleave.
+    ── THE A:B SET: B ∈ {2, 4, 8, 16}, A RUNNING 1..B (issue #62) ──────────────
+    §12.2 USED to trail off — "1:2, 2:2, 1:4, 2:4, 3:4, 1:8 …" — and Phase 6 had to
+    INFER where the ellipsis ended. It guessed B ∈ {2, 4, 8}. Issue #62 escalated
+    the guess; the resolution is B ∈ {2, 4, 8, 16}, i.e. 2 + 4 + 8 + 16 = 30 A:B
+    entries, because Elektron hardware (§12.2's stated design reference) offers
+    1:16 through 16:16 and 16-step cycles are musically common. §12.2 now
+    ENUMERATES the set exhaustively — the ellipsis that caused this is gone, so
+    nobody has to infer it again. There is deliberately no :3/:5/:6/:7 family.
+    `A:B` fires on loop A of every B pattern loops (§12.2 "pattern-loop-aware").
 
-    APPEND-ONLY: these ordinals are the COND lane's stored values (§8.1). */
+    ── APPEND-ONLY, AND THE LAST FREE MOMENT HAS PASSED ────────────────────────
+    These ordinals are the COND lane's stored values (§8.1). The :16 family was
+    INSERTED in its natural position rather than bolted on after `notNei`, which
+    was legal exactly once: at the time of the change NOTHING serialized a
+    `TrigCondition` (Phase 11 owns persistence and does not exist), the COND lane
+    was stored-but-unevaluated, and no golden could encode it (goldens are emitted
+    MIDI; COND is not evaluated). All three of those facts have an expiry date, and
+    the first one to lapse ends the exemption.
+
+    SO: FROM HERE THIS ENUM IS APPEND-ONLY, WITH NO REMAINING GRACE. Insert or
+    renumber and every saved pattern's conditions silently become different
+    conditions — 1:4 turns into 3:8 with no error anywhere. New entries (an odd-B
+    family, a new named condition) go AFTER `notNei` and before `count`, however
+    ugly that reads. The `static_assert`s below pin the current ordinals so an
+    accidental insertion fails to compile rather than corrupting projects. */
 enum class TrigCondition : std::uint8_t
 {
     none = 0, ///< No condition — the step always passes the gate.
@@ -114,10 +131,12 @@ enum class TrigCondition : std::uint8_t
     // A:B loop cycles, §12.2. Fires on loop A of every B loops of the pattern.
     ab1of2,
     ab2of2,
+
     ab1of4,
     ab2of4,
     ab3of4,
     ab4of4,
+
     ab1of8,
     ab2of8,
     ab3of8,
@@ -126,6 +145,23 @@ enum class TrigCondition : std::uint8_t
     ab6of8,
     ab7of8,
     ab8of8,
+
+    ab1of16,
+    ab2of16,
+    ab3of16,
+    ab4of16,
+    ab5of16,
+    ab6of16,
+    ab7of16,
+    ab8of16,
+    ab9of16,
+    ab10of16,
+    ab11of16,
+    ab12of16,
+    ab13of16,
+    ab14of16,
+    ab15of16,
+    ab16of16,
 
     first,    ///< 1ST   — only on the first loop of the pattern.
     notFirst, ///< !1ST  — every loop except the first.
@@ -140,6 +176,23 @@ enum class TrigCondition : std::uint8_t
 
 /** Number of trig conditions, including `none`. */
 inline constexpr int numTrigConditions = static_cast<int> (TrigCondition::count);
+
+// ── THE SERIALIZED ORDINALS, PINNED ──────────────────────────────────────────
+// The append-only rule above, made checkable. These are the values Phase 11 will
+// write into `project.json`'s COND lane; an insertion anywhere in the enum shifts
+// one of them and fails HERE, at compile time, instead of silently remapping every
+// saved pattern's conditions. Adding a new entry before `count` moves only
+// `numTrigConditions`, which is the one line a legal append is expected to touch.
+static_assert (static_cast<int> (TrigCondition::none) == 0, "COND ordinal 0 is `none`.");
+static_assert (static_cast<int> (TrigCondition::ab1of2) == 1, "The A:B block starts at ordinal 1.");
+static_assert (static_cast<int> (TrigCondition::ab1of4) == 3, "The :4 family follows the :2 family.");
+static_assert (static_cast<int> (TrigCondition::ab1of8) == 7, "The :8 family follows the :4 family.");
+static_assert (static_cast<int> (TrigCondition::ab1of16) == 15, "The :16 family follows the :8 family.");
+static_assert (static_cast<int> (TrigCondition::ab16of16) == 30, "2 + 4 + 8 + 16 = 30 A:B entries.");
+static_assert (static_cast<int> (TrigCondition::first) == 31, "The named conditions follow the A:B block.");
+static_assert (static_cast<int> (TrigCondition::notNei) == 38, "`notNei` is the last entry; append AFTER it.");
+static_assert (numTrigConditions == 39, "1 `none` + 30 A:B + 8 named (ARCHITECTURE §12.2).");
+static_assert (numTrigConditions - 1 <= 255, "COND ordinals must fit the enum's std::uint8_t base type.");
 
 /** One parameter lane's stored data (ARCHITECTURE §5.1 L1, §12.1).
 
