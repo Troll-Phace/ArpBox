@@ -22,8 +22,8 @@ namespace arpbox::engine
     either side of the boundary. */
 enum DeviceStatus : std::uint8_t
 {
-    deviceStatusOk = 0,               ///< Requested device is active and healthy.
-    deviceStatusFellBackToDefault = 1,///< Requested device was lost; auto-fell back to the system default.
-    deviceStatusDead = 2              ///< No usable output device (silence); UI shows a hard error.
+    deviceStatusOk = 0,                ///< Requested device is active and healthy.
+    deviceStatusFellBackToDefault = 1, ///< Requested device was lost; auto-fell back to the system default.
+    deviceStatusDead = 2               ///< No usable output device (silence); UI shows a hard error.
 };
 } // namespace arpbox::engine

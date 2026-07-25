@@ -236,8 +236,7 @@ private:
     // RT-SAFE: exact PPQ at an absolute sample position within the current segment.
     double ppqAtSample (std::int64_t sample) const noexcept
     {
-        return anchorPpq
-             + static_cast<double> (sample - anchorSample) * ppqPerSampleValue;
+        return anchorPpq + static_cast<double> (sample - anchorSample) * ppqPerSampleValue;
     }
 
     // RT-SAFE: copies the live state into the latched block-start members and
@@ -245,18 +244,18 @@ private:
     void latchBlockStart (int numSamples) noexcept;
 
     // ── Live state (advances / mutates; audio thread, plus prepare()) ─────────
-    std::int64_t samplePosition = 0; ///< EXACT timeline position of the NEXT block's first sample.
-    std::int64_t anchorSample = 0;   ///< Sample at which the current tempo segment starts.
-    double anchorPpq = 0.0;          ///< PPQ at `anchorSample`.
-    double ppqPerSampleValue = 0.0;  ///< Quarter notes per sample for the current segment.
-    double currentBpm = defaultBpm;  ///< Current tempo (clamped to [minBpm, maxBpm]).
+    std::int64_t samplePosition = 0;    ///< EXACT timeline position of the NEXT block's first sample.
+    std::int64_t anchorSample = 0;      ///< Sample at which the current tempo segment starts.
+    double anchorPpq = 0.0;             ///< PPQ at `anchorSample`.
+    double ppqPerSampleValue = 0.0;     ///< Quarter notes per sample for the current segment.
+    double currentBpm = defaultBpm;     ///< Current tempo (clamped to [minBpm, maxBpm]).
     double currentSampleRate = 44100.0; ///< Set by prepare().
-    bool playing = false;            ///< Transport run state.
+    bool playing = false;               ///< Transport run state.
 
     // One-shot edges raised by applyCommand, consumed by the next latchBlockStart.
-    bool stopEdge = false;           ///< A stop was consumed since the last latch.
-    bool positionJumpEdge = false;   ///< A locate/rewind was applied since the last latch.
-    std::uint64_t stopCounter = 0;   ///< Monotonic stop count (see stopGeneration()).
+    bool stopEdge = false;         ///< A stop was consumed since the last latch.
+    bool positionJumpEdge = false; ///< A locate/rewind was applied since the last latch.
+    std::uint64_t stopCounter = 0; ///< Monotonic stop count (see stopGeneration()).
 
     // ── Latched block-start state (what every getter returns) ─────────────────
     double latchedPpq = 0.0;

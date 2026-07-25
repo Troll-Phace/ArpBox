@@ -104,7 +104,9 @@ struct WrappedObserverRig
     int blockSize;
 
     explicit WrappedObserverRig (double rate = kGraphSampleRate, int size = kGraphBlockSize)
-        : buffer (2, size), sampleRate (rate), blockSize (size)
+        : buffer (2, size)
+        , sampleRate (rate)
+        , blockSize (size)
     {
         graph.prepareToPlay (rate, size);
 
@@ -179,8 +181,7 @@ TEST_CASE ("hosting/playhead: a wrapped hosted plugin observes the engine BPM an
     {
         const PlayHeadObservation& observation = observations[static_cast<std::size_t> (i)];
         INFO ("block " << i << ": bpm=" << observation.bpm << " ppq=" << observation.ppqPosition
-                       << " samples=" << observation.timeInSamples
-                       << " playing=" << observation.isPlaying);
+                       << " samples=" << observation.timeInSamples << " playing=" << observation.isPlaying);
 
         REQUIRE (observation.blockIndex == i);
         REQUIRE (observation.hadPlayHead);
@@ -193,8 +194,8 @@ TEST_CASE ("hosting/playhead: a wrapped hosted plugin observes the engine BPM an
         // Position, from first principles. EXACT equality is deliberate: the
         // transport re-derives PPQ from an int64 sample counter (Transport.h), so a
         // per-block float accumulator — which WOULD drift over 32 blocks — fails here.
-        REQUIRE (observation.timeInSamples
-                 == static_cast<std::int64_t> (i) * static_cast<std::int64_t> (rig.blockSize));
+        REQUIRE (observation.timeInSamples ==
+                 static_cast<std::int64_t> (i) * static_cast<std::int64_t> (rig.blockSize));
         REQUIRE (observation.ppqPosition == expectedPpqAtBlock (i, rig.blockSize, bpm, rig.sampleRate));
 
         // The 4/4 bar grid a synced plugin's dotted delay depends on.
@@ -204,8 +205,8 @@ TEST_CASE ("hosting/playhead: a wrapped hosted plugin observes the engine BPM an
     // PPQ advanced by exactly one block's worth per block — stated independently of
     // the loop above so a constant-but-wrong-rate playhead cannot slip through.
     const double perBlockPpq = static_cast<double> (rig.blockSize) * ppqPerSampleFor (bpm, rig.sampleRate);
-    REQUIRE (observations.back ().ppqPosition - observations.front ().ppqPosition
-             == static_cast<double> (measuredBlocks - 1) * perBlockPpq);
+    REQUIRE (observations.back ().ppqPosition - observations.front ().ppqPosition ==
+             static_cast<double> (measuredBlocks - 1) * perBlockPpq);
 }
 
 TEST_CASE ("hosting/playhead: a wrapped hosted plugin observes a stopped transport", "[hosting-lab]")
@@ -268,8 +269,7 @@ TEST_CASE ("hosting/playhead: the same absolute sample yields the same PPQ at an
         INFO ("block size " << blockSize << ", observation ppq " << observation.ppqPosition);
 
         REQUIRE (observation.timeInSamples == targetSample);
-        REQUIRE (observation.ppqPosition
-                 == expectedPpqAtBlock (blockAtTarget, blockSize, bpm, kGraphSampleRate));
+        REQUIRE (observation.ppqPosition == expectedPpqAtBlock (blockAtTarget, blockSize, bpm, kGraphSampleRate));
 
         if (reference < 0.0)
             reference = observation.ppqPosition;
@@ -324,8 +324,7 @@ TEST_CASE ("hosting/playhead: HostedPluginNode forwards the graph playhead to it
     REQUIRE (rig.fake->missingPositionBlocks () == 0);
     REQUIRE (rig.fake->lastObservation ().bpm == bpm);
     REQUIRE (rig.fake->lastObservation ().isPlaying);
-    REQUIRE (rig.fake->lastObservation ().ppqPosition
-             == expectedPpqAtBlock (7, rig.blockSize, bpm, rig.sampleRate));
+    REQUIRE (rig.fake->lastObservation ().ppqPosition == expectedPpqAtBlock (7, rig.blockSize, bpm, rig.sampleRate));
 }
 
 TEST_CASE ("hosting/playhead: a tempo change reaches the wrapped plugin on the next block", "[hosting-lab]")
@@ -367,7 +366,7 @@ TEST_CASE ("hosting/playhead: a tempo change reaches the wrapped plugin on the n
         const auto& observation = observations[static_cast<std::size_t> (firstLeg + i)];
         INFO ("second-leg block " << i << " ppq " << observation.ppqPosition);
         REQUIRE (observation.bpm == secondBpm);
-        REQUIRE (observation.ppqPosition
-                 == ppqAtChange + static_cast<double> (static_cast<std::int64_t> (i) * rig.blockSize) * secondRate);
+        REQUIRE (observation.ppqPosition ==
+                 ppqAtChange + static_cast<double> (static_cast<std::int64_t> (i) * rig.blockSize) * secondRate);
     }
 }

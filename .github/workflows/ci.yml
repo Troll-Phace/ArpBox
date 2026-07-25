@@ -101,6 +101,48 @@ jobs:
           path: build/app/ARPBOX_artefacts/RelWithDebInfo/ARPBOX.app
           if-no-files-found: error
 
+  format:
+    name: clang-format (blocking)
+    runs-on: macos-14
+    # BLOCKING, unlike the clang-tidy job below. Issue #30: the format-on-save
+    # hook was a silent no-op since Phase 1, so the tree drifted from
+    # .clang-format in 60 of 85 files before anyone noticed. A format violation
+    # is objective, machine-decidable and fixed by one command
+    # (`ARPBOX_ALLOW_FORMAT_FIX=1 lint.sh format-fix`) — nothing like a
+    # clang-tidy finding, which can be a judgement call on scaffold code. So this
+    # gate blocks: drift is precisely what we are preventing from recurring.
+    steps:
+      # No submodules: the format check only reads tracked ARPBOX sources
+      # (app/ engine/ hosting/ scanner-helper/ ui/ tests/) plus .clang-format.
+      # JUCE/ is never formatted with our config.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang-format (pinned LLVM major)
+        # Pinned to llvm@22 deliberately. clang-format changes formatting
+        # defaults between majors (ReflowComments did in LLVM 21), and a
+        # blocking gate must not turn the whole tree red because an unversioned
+        # `brew install llvm` floated to a new major. Bumping this pin is a
+        # deliberate change that comes with its own reformat commit.
+        # `llvm@22` is currently an ALIAS for `llvm` (22.1.8) and becomes a real
+        # versioned formula when Homebrew's llvm moves to 23; the
+        # `brew --prefix llvm@22` below resolves either layout, so no path is
+        # hardcoded. Verified locally: Apple clang-format 21 and Homebrew 22
+        # produce byte-identical output for all 85 tracked sources under this
+        # .clang-format, so the pin is about future majors, not current skew.
+        run: brew install llvm@22
+
+      - name: Check formatting (shared lint driver)
+        # ONE mechanism, shared with the local /run-lint skill and the
+        # format-on-save hook (issue #31 / #30): lint.sh resolves clang-format,
+        # enumerates the same git-tracked files a developer sees, and runs
+        # --dry-run --Werror so any drift is a non-zero exit. ARPBOX_LLVM_BIN
+        # points its resolver at the pinned formula instead of the unversioned
+        # /opt/homebrew/opt/llvm/bin it prefers by default.
+        run: |
+          export ARPBOX_LLVM_BIN="$(brew --prefix llvm@22)/bin"
+          bash .claude/skills/run-lint/lint.sh format
+
   lint:
     name: clang-tidy (single-arch DB, non-blocking)
     runs-on: macos-14

@@ -53,10 +53,7 @@ public:
         @param blockSize    Max block size to prepare at (graph's current block).
         @param callback     Message-thread completion; never called on the audio
                             thread and never called re-entrantly before return. */
-    void instantiate (const juce::PluginDescription& description,
-                      double sampleRate,
-                      int blockSize,
-                      Callback callback);
+    void instantiate (const juce::PluginDescription& description, double sampleRate, int blockSize, Callback callback);
 
 private:
     // Borrowed, not owned (the DI seam). Must outlive this object.

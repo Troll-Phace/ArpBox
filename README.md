@@ -120,10 +120,16 @@ Xcode toolchain does not ship them — `brew install llvm`). One script drives
 linting for both developers and CI:
 
 ```
-bash .claude/skills/run-lint/lint.sh tidy      # clang-tidy via the `tidy` preset
-bash .claude/skills/run-lint/lint.sh format    # clang-format --dry-run (check only)
-bash .claude/skills/run-lint/lint.sh tools     # show resolved tool paths
+bash .claude/skills/run-lint/lint.sh tidy               # clang-tidy via the `tidy` preset
+bash .claude/skills/run-lint/lint.sh format             # clang-format --dry-run (check only)
+bash .claude/skills/run-lint/lint.sh format-file FILE   # clang-format -i on specific files
+bash .claude/skills/run-lint/lint.sh tools              # show resolved tool paths
 ```
+
+Formatting is enforced in two places, both through this script: a `PostToolUse`
+hook formats every C++ file on save, and CI's **blocking** `clang-format` job
+runs `format` over the whole tracked tree. A repo-wide reformat is a deliberate,
+standalone commit (`ARPBOX_ALLOW_FORMAT_FIX=1 ... format-fix`).
 
 ## Project layout
 

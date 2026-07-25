@@ -10,7 +10,8 @@ using namespace juce;
 
 // MESSAGE-THREAD ONLY.
 SynthSlot::SynthSlot (ISynthEngine& engineToUse, AudioPluginFormatManager& formats)
-    : engine (engineToUse), instantiator (formats)
+    : engine (engineToUse)
+    , instantiator (formats)
 {
 }
 
@@ -44,7 +45,9 @@ void SynthSlot::load (const PluginDescription& description)
     // us. If the slot is destroyed first, `weak.get()` returns null and the prepared
     // instance simply frees on the message thread.
     WeakReference<SynthSlot> weak (this);
-    instantiator.instantiate (description, sampleRate, blockSize,
+    instantiator.instantiate (description,
+                              sampleRate,
+                              blockSize,
                               [weak, myGeneration] (hosting::InstantiationResult result) mutable
                               {
                                   if (auto* self = weak.get ())

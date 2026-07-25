@@ -41,10 +41,7 @@ void EngineGraph::buildGraph ()
     // 2 output channels here makes those connections legal. SR/block are placeholders
     // (the player / prepareToPlay re-set them with real values; output stays 2, so
     // the connections persist).
-    graph.setPlayConfigDetails (numStereoChannels,
-                                numStereoChannels,
-                                placeholderSampleRate,
-                                placeholderBlockSize);
+    graph.setPlayConfigDetails (numStereoChannels, numStereoChannels, placeholderSampleRate, placeholderBlockSize);
 
     // ── NODE INSERTION ORDER IS LOAD-BEARING (Phase 5.1) ─────────────────────
     // The transport head node must render FIRST: it drains the command queue and
@@ -230,10 +227,10 @@ void EngineGraph::setSynth (std::unique_ptr<juce::AudioProcessor> synth)
     // Assert the edge: this is the ONLY path by which generated MIDI reaches the synth,
     // so a silent rejection means total silence — the Phase-4 failure mode.
     {
-        [[maybe_unused]] const bool synthMidiWired = graph.addConnection (
-            { { sequencerNodeId, juce::AudioProcessorGraph::midiChannelIndex },
-              { synthNodeId, juce::AudioProcessorGraph::midiChannelIndex } },
-            UpdateKind::async);
+        [[maybe_unused]] const bool synthMidiWired =
+            graph.addConnection ({ { sequencerNodeId, juce::AudioProcessorGraph::midiChannelIndex },
+                                   { synthNodeId, juce::AudioProcessorGraph::midiChannelIndex } },
+                                 UpdateKind::async);
 
         // A slot occupant that does not accept MIDI (an audio-only probe in a test, a
         // mis-declared plugin) makes the refusal CORRECT, so scope the assertion to the

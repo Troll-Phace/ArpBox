@@ -142,7 +142,7 @@ private:
     // for a swap or a remove.
     void beginFadeOutWait () noexcept;
 
-    ISynthEngine& engine; ///< Non-owning; the graph this coordinator hands synths to.
+    ISynthEngine& engine;                     ///< Non-owning; the graph this coordinator hands synths to.
     hosting::PluginInstantiator instantiator; ///< Owns the async create+prepare path.
 
     // Non-owning: valid while the engine graph owns the node. Cleared on removal.

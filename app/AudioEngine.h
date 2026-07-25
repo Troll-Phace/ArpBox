@@ -192,8 +192,7 @@ private:
     // message thread): forwards each hardware MIDI message into the graph's shared
     // collector (internally synchronized), which the MIDI-In node drains on the
     // audio thread. Does the minimum — no allocation beyond the collector's own.
-    void handleIncomingMidiMessage (juce::MidiInput* source,
-                                    const juce::MidiMessage& message) override;
+    void handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& message) override;
 
     // ── Internal helpers (message thread) ────────────────────────────────────
 
@@ -220,8 +219,8 @@ private:
 
     // Cross-thread device-death signalling. Set on the audio/device thread, read
     // and cleared on the message thread in handleAsyncUpdate().
-    std::atomic<bool> deviceErrored { false };  ///< A genuine driver error fired.
-    std::atomic<bool> simulatedLoss { false };  ///< simulateDeviceLoss() requested.
+    std::atomic<bool> deviceErrored { false };      ///< A genuine driver error fired.
+    std::atomic<bool> simulatedLoss { false };      ///< simulateDeviceLoss() requested.
     std::atomic<bool> fallbackInProgress { false }; ///< Debounces re-entrant fallback.
 
     // MESSAGE-THREAD ONLY: bounded-fallback retry state, touched only inside
@@ -253,7 +252,7 @@ private:
     // then player, then graph LAST (its nodes hold pointers into graph-owned
     // channels; nothing may reference the graph after it is gone). The destructor
     // also performs this teardown explicitly before member destruction runs.
-    engine::EngineGraph graph;             ///< Destroyed LAST.
+    engine::EngineGraph graph;              ///< Destroyed LAST.
     juce::AudioProcessorPlayer player;      ///< Destroyed after deviceManager.
     juce::AudioDeviceManager deviceManager; ///< Destroyed FIRST.
 

@@ -77,9 +77,8 @@ constexpr std::int64_t gateSamples = 3000;
 /** The scaffold's one-octave-ascending pitch sequence (C major from middle C), as the
     UI/ear would describe it — written out independently of the node's own table so a
     change to that table has to be justified here too. */
-constexpr int scaffoldPitches[SequencerProcessor::scaffoldNumSteps] = {
-    60, 62, 64, 65, 67, 69, 71, 72, 60, 62, 64, 65, 67, 69, 71, 72
-};
+constexpr int scaffoldPitches[SequencerProcessor::scaffoldNumSteps] = { 60, 62, 64, 65, 67, 69, 71, 72,
+                                                                        60, 62, 64, 65, 67, 69, 71, 72 };
 
 /** Pumps the message loop in bounded slices so a queued async graph edit is applied
     before the caller renders. The budget is a HANG GUARD, not a sync primitive (same
@@ -110,8 +109,7 @@ std::vector<TimedMidiEvent> noteOffsOf (const MidiRenderResult& render)
 
 std::vector<TimedMidiEvent> allNotesOffOf (const MidiRenderResult& render)
 {
-    return render.select ([] (const TimedMidiEvent& event)
-                          { return event.message.isControllerOfType (123); });
+    return render.select ([] (const TimedMidiEvent& event) { return event.message.isControllerOfType (123); });
 }
 
 /** Counts events of a kind in a `juce::MidiBuffer` (for the table's own unit tests). */
@@ -124,7 +122,10 @@ int countIf (const juce::MidiBuffer& midi, bool (*predicate) (const juce::MidiMe
     return count;
 }
 
-bool isNoteOffMessage (const juce::MidiMessage& message) { return message.isNoteOff (); }
+bool isNoteOffMessage (const juce::MidiMessage& message)
+{
+    return message.isNoteOff ();
+}
 bool isAllNotesOffMessage (const juce::MidiMessage& message)
 {
     return message.isControllerOfType (123);
@@ -146,8 +147,7 @@ void addRawNoteOn (juce::MidiBuffer& midi, int channel, int note, int velocity, 
 // 1. The scaffold pattern as a performance
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE ("sequencer/scaffold: one bar is 16 ascending 16ths at velocity 100 with 50% gates",
-           "[unit]")
+TEST_CASE ("sequencer/scaffold: one bar is 16 ascending 16ths at velocity 100 with 50% gates", "[unit]")
 {
     // One bar at 120 BPM / 48 kHz = 96000 samples = 750 blocks of 128, covering steps
     // 0..15 exactly (step 16 would sit on the bar line, which the half-open interval
@@ -156,10 +156,9 @@ TEST_CASE ("sequencer/scaffold: one bar is 16 ascending 16ths at velocity 100 wi
     REQUIRE (scaffoldGateSamples (120.0, testSampleRate) == gateSamples);
 
     SequencerRig rig { testSampleRate, testBlockSize };
-    const auto render = renderSequencer (
-        rig,
-        nodeBlocks (750),
-        { ScheduledCommand { 0, engineCommand (EngineCommandType::transportPlay) } });
+    const auto render = renderSequencer (rig,
+                                         nodeBlocks (750),
+                                         { ScheduledCommand { 0, engineCommand (EngineCommandType::transportPlay) } });
 
     INFO (render.describe (40));
     REQUIRE (render.numSamples == 96000);
@@ -233,10 +232,10 @@ TEST_CASE ("sequencer/flush: transport stop empties the sounding-note table", "[
     // 3000) and 1 (note 62 @ 6000, gate open until 9000) have fired, so when this
     // render ends EXACTLY one note is sounding, mid-gate. That is the state a stop has
     // to clean up.
-    const auto upToTheStop = renderSequencer (
-        rig,
-        nodeBlocks (48),
-        { ScheduledCommand { 0, engineCommand (EngineCommandType::transportPlay) } });
+    const auto upToTheStop =
+        renderSequencer (rig,
+                         nodeBlocks (48),
+                         { ScheduledCommand { 0, engineCommand (EngineCommandType::transportPlay) } });
 
     INFO (upToTheStop.describe ());
     REQUIRE (noteOnsOf (upToTheStop).size () == 2u);
@@ -248,10 +247,10 @@ TEST_CASE ("sequencer/flush: transport stop empties the sounding-note table", "[
     // The stop is consumed at the head of this render's first block, and the sequencer
     // sees `stoppedThisBlock()` in the SAME block because the transport head node
     // renders first (§5.5, Transport.h stop semantics).
-    const auto afterTheStop = renderSequencer (
-        rig,
-        nodeBlocks (2),
-        { ScheduledCommand { 0, engineCommand (EngineCommandType::transportStop) } });
+    const auto afterTheStop =
+        renderSequencer (rig,
+                         nodeBlocks (2),
+                         { ScheduledCommand { 0, engineCommand (EngineCommandType::transportStop) } });
 
     INFO (afterTheStop.describe ());
 
@@ -294,19 +293,19 @@ TEST_CASE ("sequencer/flush: a locate empties the sounding-note table", "[unit][
     // unlike a stop — the transport keeps PLAYING through it.
     SequencerRig rig { testSampleRate, testBlockSize };
 
-    const auto upToTheLocate = renderSequencer (
-        rig,
-        nodeBlocks (48),
-        { ScheduledCommand { 0, engineCommand (EngineCommandType::transportPlay) } });
+    const auto upToTheLocate =
+        renderSequencer (rig,
+                         nodeBlocks (48),
+                         { ScheduledCommand { 0, engineCommand (EngineCommandType::transportPlay) } });
     REQUIRE (rig.sequencer.soundingNotes ().size () == 1);
 
     // Target PPQ 8.1 — deliberately BETWEEN step boundaries (steps sit on multiples of
     // 0.25), so this render contains the flush and nothing else. The next step boundary
     // (8.25) is 3600 samples away, well past the two blocks rendered here.
-    const auto afterTheLocate = renderSequencer (
-        rig,
-        nodeBlocks (2),
-        { ScheduledCommand { 0, engineCommand (EngineCommandType::transportLocate, 8.1) } });
+    const auto afterTheLocate =
+        renderSequencer (rig,
+                         nodeBlocks (2),
+                         { ScheduledCommand { 0, engineCommand (EngineCommandType::transportLocate, 8.1) } });
 
     INFO (afterTheLocate.describe ());
     REQUIRE (rig.transport.isPlaying ()); // a locate does not stop the transport
@@ -326,8 +325,7 @@ TEST_CASE ("sequencer/flush: a locate empties the sounding-note table", "[unit][
     REQUIRE (tracker.balanced ());
 }
 
-TEST_CASE ("sequencer/flush: a stop the node never observed still flushes",
-           "[unit][midi-conformance]")
+TEST_CASE ("sequencer/flush: a stop the node never observed still flushes", "[unit][midi-conformance]")
 {
     // THE MISSED-BLOCK SAFETY NET (SequencerProcessor.h, third flush point). This node
     // is spliced into the graph by an `UpdateKind::async` edit, so it can begin
@@ -340,10 +338,9 @@ TEST_CASE ("sequencer/flush: a stop the node never observed still flushes",
     // Play until one note is sounding — and, importantly, until the node has seeded its
     // generation watermark (it does so on its first block, so that joining an
     // already-stopped session does not fire a spurious flush).
-    const auto playing = renderSequencer (
-        rig,
-        nodeBlocks (48),
-        { ScheduledCommand { 0, engineCommand (EngineCommandType::transportPlay) } });
+    const auto playing = renderSequencer (rig,
+                                          nodeBlocks (48),
+                                          { ScheduledCommand { 0, engineCommand (EngineCommandType::transportPlay) } });
     REQUIRE (noteOnsOf (playing).size () == 2u);
     REQUIRE (rig.sequencer.soundingNotes ().size () == 1);
 
@@ -381,8 +378,7 @@ TEST_CASE ("sequencer/flush: a stop the node never observed still flushes",
     REQUIRE (tracker.balanced ());
 }
 
-TEST_CASE ("graph/flush: stopping through the assembled graph empties the sequencer table",
-           "[unit][midi-conformance]")
+TEST_CASE ("graph/flush: stopping through the assembled graph empties the sequencer table", "[unit][midi-conformance]")
 {
     // The same criterion on the REAL path: commands through the engine command queue,
     // the transport head node draining them, the sequencer node spliced into
@@ -517,8 +513,7 @@ TEST_CASE ("support/note-lifecycle: the tracker detects orphans and unmatched no
     REQUIRE (perChannel.noteOnsSeen () == 0);
 }
 
-TEST_CASE ("sequencer/lifecycle: a scripted transport script leaves zero orphan note-ons",
-           "[unit][midi-conformance]")
+TEST_CASE ("sequencer/lifecycle: a scripted transport script leaves zero orphan note-ons", "[unit][midi-conformance]")
 {
     // A deterministic (no RNG) churn script over one render: tempo extremes, a locate
     // mid-gate, stop/restart cycles. Every command sample is a multiple of 128 so it
@@ -561,8 +556,7 @@ TEST_CASE ("sequencer/lifecycle: a scripted transport script leaves zero orphan 
     REQUIRE (rig.sequencer.soundingNotes ().droppedNoteOnCount () == 0);
 }
 
-TEST_CASE ("sequencer/lifecycle: seeded transport churn leaves no stuck note",
-           "[unit][midi-conformance]")
+TEST_CASE ("sequencer/lifecycle: seeded transport churn leaves no stuck note", "[unit][midi-conformance]")
 {
     // The Phase-5 ancestor of Phase 8.3's hanging-note fuzzer: random play / stop /
     // locate / tempo churn, rendered block by block (never slept on), asserting the
@@ -600,8 +594,7 @@ TEST_CASE ("sequencer/lifecycle: seeded transport churn leaves no stuck note",
         else if (a <= 5) // stop (20%) — the primary flush point
             rig.transport.applyCommand (engineCommand (EngineCommandType::transportStop));
         else if (a <= 7) // locate (20%) — the position-jump flush point
-            rig.transport.applyCommand (
-                engineCommand (EngineCommandType::transportLocate, locateTarget (rng)));
+            rig.transport.applyCommand (engineCommand (EngineCommandType::transportLocate, locateTarget (rng)));
         else // tempo change (20%) — re-anchors the clock under sounding notes
             rig.transport.applyCommand (engineCommand (EngineCommandType::setTempoBpm, tempoBpm (rng)));
 
@@ -916,8 +909,7 @@ TEST_CASE ("midi/sounding-table: flush sweeps CC123 only on channels it sounded 
 // 5. RT-safety — [perf-budget], excluded from the sanitizer `-L unit` runs
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE ("sequencer/alloc-guard: zero allocations across the transport and sequencer path",
-           "[perf-budget]")
+TEST_CASE ("sequencer/alloc-guard: zero allocations across the transport and sequencer path", "[perf-budget]")
 {
     // ARCHITECTURE §11: "Audio-thread allocations in steady state = 0". The measured
     // region deliberately CONTAINS FLUSHES: a flush is the one place this node emits a

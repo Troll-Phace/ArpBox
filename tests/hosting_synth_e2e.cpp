@@ -49,9 +49,9 @@ TEST_CASE ("hosting/synth-e2e: note-on drives the hosted synth to non-silent aud
         pushNoteOn (graph, 60, 100);
         const float peak = renderBlocks (graph, buffer, midi, 16); // route + fade settle
         REQUIRE (allFinite (buffer));
-        REQUIRE (peak > 0.0f);                                     // audio non-silence
-        REQUIRE (peak <= 1.0001f);                                 // bounded by the master
-        REQUIRE (graph.snapshots ().read ().voiceCount == 1);      // held note tracked
+        REQUIRE (peak > 0.0f);                                // audio non-silence
+        REQUIRE (peak <= 1.0001f);                            // bounded by the master
+        REQUIRE (graph.snapshots ().read ().voiceCount == 1); // held note tracked
 
         SECTION ("note-off → returns to silence and zero voices")
         {

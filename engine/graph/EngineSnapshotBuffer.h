@@ -53,10 +53,7 @@ public:
     /** Returns the writer-owned slot to fill IN PLACE, avoiding a full-struct
         copy. Mutate the returned reference, then call `commit()` to publish.
         The reference stays valid and writer-exclusive until `commit()`. */
-    EngineSnapshot& beginWrite () noexcept
-    {
-        return slots[static_cast<std::size_t> (writeSlot)];
-    }
+    EngineSnapshot& beginWrite () noexcept { return slots[static_cast<std::size_t> (writeSlot)]; }
 
     // RT-SAFE: writer (audio thread). Lock-free, allocation-free, wait-free.
     /** Atomically publishes the slot last returned by `beginWrite()` as the new

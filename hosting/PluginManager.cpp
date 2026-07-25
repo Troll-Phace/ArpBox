@@ -114,9 +114,8 @@ PluginManager::ScanResult PluginManager::scanOneFormat (AudioPluginFormat& forma
 }
 
 // BLOCKING — SCANNING (WORKER) THREAD. Never the audio thread.
-PluginManager::ScanResult PluginManager::scanAll (bool rescanExisting,
-                                                  const ProgressCallback& onProgress,
-                                                  const CancelCallback& shouldCancel)
+PluginManager::ScanResult
+PluginManager::scanAll (bool rescanExisting, const ProgressCallback& onProgress, const CancelCallback& shouldCancel)
 {
     ScanResult aggregate;
 
@@ -214,11 +213,10 @@ File PluginManager::getSettingsDirectory () const
     // userApplicationDataDirectory maps to ~/Library, so we descend into
     // "Application Support/ARPBOX" (issue #13: the old code stopped at
     // ~/Library/ARPBOX, contradicting §6.1 and AudioEngine).
-    auto dir = settingsDir != File ()
-                 ? settingsDir
-                 : File::getSpecialLocation (File::userApplicationDataDirectory)
-                       .getChildFile ("Application Support")
-                       .getChildFile ("ARPBOX");
+    auto dir = settingsDir != File () ? settingsDir
+                                      : File::getSpecialLocation (File::userApplicationDataDirectory)
+                                            .getChildFile ("Application Support")
+                                            .getChildFile ("ARPBOX");
 
     if (! dir.isDirectory ())
         dir.createDirectory ();
@@ -239,8 +237,7 @@ void PluginManager::migrateLegacySettingsIfNeeded () const
     if (settingsDir != File ())
         return; // custom/test dir — do not migrate the user's real legacy files.
 
-    const auto legacyDir = File::getSpecialLocation (File::userApplicationDataDirectory)
-                               .getChildFile ("ARPBOX");
+    const auto legacyDir = File::getSpecialLocation (File::userApplicationDataDirectory).getChildFile ("ARPBOX");
     const auto currentDir = getSettingsDirectory (); // ensures the new dir exists.
 
     // Defensive: if a platform ever maps both to the same place, or the legacy dir

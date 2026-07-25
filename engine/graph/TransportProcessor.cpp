@@ -24,16 +24,14 @@ TransportProcessor::TransportProcessor ()
 }
 
 // MESSAGE-THREAD ONLY:
-void TransportProcessor::setSharedState (EngineCommandQueue* commands,
-                                        Transport* transportToDrive) noexcept
+void TransportProcessor::setSharedState (EngineCommandQueue* commands, Transport* transportToDrive) noexcept
 {
     commandQueue = commands;
     transport = transportToDrive;
 }
 
 // MESSAGE-THREAD ONLY:
-void TransportProcessor::setCommandSinks (
-    std::array<ICommandSink*, maxCommandSinks> sinksToUse) noexcept
+void TransportProcessor::setCommandSinks (std::array<ICommandSink*, maxCommandSinks> sinksToUse) noexcept
 {
     sinks = sinksToUse;
 }
@@ -92,7 +90,6 @@ void TransportProcessor::processBlock (juce::AudioBuffer<double>& buffer, juce::
 bool TransportProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     // MIDI-only: accept only the empty (no main audio in/out) layout.
-    return layouts.getMainInputChannelSet ().isDisabled ()
-        && layouts.getMainOutputChannelSet ().isDisabled ();
+    return layouts.getMainInputChannelSet ().isDisabled () && layouts.getMainOutputChannelSet ().isDisabled ();
 }
 } // namespace arpbox::engine

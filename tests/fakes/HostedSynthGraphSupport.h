@@ -79,10 +79,7 @@ inline void settleGraphEdits (int slices = 20, int msPerSlice = 5)
 }
 
 /** Renders `n` blocks through the graph and returns the last published left peak. */
-inline float renderBlocks (engine::EngineGraph& graph,
-                           juce::AudioBuffer<float>& buffer,
-                           juce::MidiBuffer& midi,
-                           int n)
+inline float renderBlocks (engine::EngineGraph& graph, juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, int n)
 {
     for (int i = 0; i < n; ++i)
     {

@@ -91,8 +91,8 @@ struct TimedMidiEvent
     /** True if both messages carry identical raw bytes (ignoring position). */
     bool sameBytes (const TimedMidiEvent& other) const noexcept
     {
-        return numBytes () == other.numBytes ()
-            && std::memcmp (bytes (), other.bytes (), static_cast<std::size_t> (numBytes ())) == 0;
+        return numBytes () == other.numBytes () &&
+               std::memcmp (bytes (), other.bytes (), static_cast<std::size_t> (numBytes ())) == 0;
     }
 
     /** Byte-for-byte equality including the absolute position. */
@@ -127,7 +127,8 @@ struct TimedMidiEvent
         text << "@" << juce::String (absoluteSample);
 
         for (int i = 0; i < numBytes (); ++i)
-            text << " " << juce::String::toHexString (static_cast<int> (bytes ()[i])).paddedLeft ('0', 2).toUpperCase ();
+            text << " "
+                 << juce::String::toHexString (static_cast<int> (bytes ()[i])).paddedLeft ('0', 2).toUpperCase ();
 
         text << "  (" << message.getDescription () << ")";
         return text;
@@ -176,10 +177,8 @@ struct MidiRenderConfig
 
     /** Samples spanned by `numBars` bars at `bpm` (4/4 unless told otherwise) — the
         Phase-6 "render N bars" arithmetic, in one place. */
-    static std::int64_t samplesForBars (double numBars,
-                                        double bpm,
-                                        double sampleRate,
-                                        double quartersPerBar = 4.0) noexcept
+    static std::int64_t
+    samplesForBars (double numBars, double bpm, double sampleRate, double quartersPerBar = 4.0) noexcept
     {
         const double quarters = numBars * quartersPerBar;
         const double seconds = quarters * (60.0 / bpm);
@@ -203,11 +202,8 @@ struct MidiRenderConfig
     }
 
     /** Enough whole blocks to cover `numBars` bars at `bpm`. */
-    static MidiRenderConfig bars (double numBars,
-                                  double bpm,
-                                  double sampleRate = 48000.0,
-                                  int blockSize = 128,
-                                  double quartersPerBar = 4.0)
+    static MidiRenderConfig
+    bars (double numBars, double bpm, double sampleRate = 48000.0, int blockSize = 128, double quartersPerBar = 4.0)
     {
         return samples (samplesForBars (numBars, bpm, sampleRate, quartersPerBar), sampleRate, blockSize);
     }
@@ -218,9 +214,9 @@ struct MidiRenderConfig
     the processor leaves in it afterwards is what gets collected). */
 struct RenderBlockContext
 {
-    int blockIndex = 0;          ///< 0-based block counter.
-    std::int64_t blockBase = 0;  ///< Absolute sample of this block's FIRST sample.
-    int numSamples = 0;          ///< This block's length.
+    int blockIndex = 0;                        ///< 0-based block counter.
+    std::int64_t blockBase = 0;                ///< Absolute sample of this block's FIRST sample.
+    int numSamples = 0;                        ///< This block's length.
     juce::AudioBuffer<float>* audio = nullptr; ///< Cleared scratch audio (never null).
     juce::MidiBuffer* midi = nullptr;          ///< Cleared MIDI buffer (never null).
 };
@@ -256,8 +252,8 @@ struct MidiRenderResult
     /** Byte-identical event streams (configuration metadata ignored). */
     bool operator== (const MidiRenderResult& other) const noexcept
     {
-        return events.size () == other.events.size ()
-            && std::equal (events.begin (), events.end (), other.events.begin ());
+        return events.size () == other.events.size () &&
+               std::equal (events.begin (), events.end (), other.events.begin ());
     }
 
     bool operator!= (const MidiRenderResult& other) const noexcept { return ! (*this == other); }
@@ -297,17 +293,18 @@ struct MidiRenderResult
         const auto index = *diff;
         text << "  first difference at index " << juce::String (static_cast<std::int64_t> (index)) << ":\n";
 
-        const auto low = index > static_cast<std::size_t> (context)
-                             ? index - static_cast<std::size_t> (context)
-                             : static_cast<std::size_t> (0);
+        const auto low = index > static_cast<std::size_t> (context) ? index - static_cast<std::size_t> (context)
+                                                                    : static_cast<std::size_t> (0);
         const auto high = index + static_cast<std::size_t> (context) + 1;
 
         for (std::size_t i = low; i < high; ++i)
         {
             const bool marked = (i == index);
             text << (marked ? "  >> [" : "     [") << juce::String (static_cast<std::int64_t> (i)) << "]\n";
-            text << "        this : " << (i < events.size () ? events[i].describe () : juce::String ("<end of stream>")) << "\n";
-            text << "        other: " << (i < other.events.size () ? other.events[i].describe () : juce::String ("<end of stream>")) << "\n";
+            text << "        this : " << (i < events.size () ? events[i].describe () : juce::String ("<end of stream>"))
+                 << "\n";
+            text << "        other: "
+                 << (i < other.events.size () ? other.events[i].describe () : juce::String ("<end of stream>")) << "\n";
         }
         return text;
     }
@@ -316,9 +313,9 @@ struct MidiRenderResult
     juce::String summary () const
     {
         juce::String text;
-        text << juce::String (static_cast<std::int64_t> (events.size ())) << " events over "
-             << juce::String (numBlocks) << " blocks (" << juce::String (blockSize) << " samples @ "
-             << juce::String (sampleRate, 1) << " Hz, " << juce::String (numSamples) << " samples total)";
+        text << juce::String (static_cast<std::int64_t> (events.size ())) << " events over " << juce::String (numBlocks)
+             << " blocks (" << juce::String (blockSize) << " samples @ " << juce::String (sampleRate, 1) << " Hz, "
+             << juce::String (numSamples) << " samples total)";
         return text;
     }
 
@@ -438,8 +435,8 @@ inline MidiRenderResult renderProcessor (juce::AudioProcessor& processor,
 
         // THE arithmetic this harness exists for: within-block offset → absolute.
         for (const auto meta : midi)
-            result.events.push_back (TimedMidiEvent { base + static_cast<std::int64_t> (meta.samplePosition),
-                                                      meta.getMessage () });
+            result.events.push_back (
+                TimedMidiEvent { base + static_cast<std::int64_t> (meta.samplePosition), meta.getMessage () });
 
         base += blockSize;
         ++result.numBlocks;
@@ -469,9 +466,7 @@ class MidiCaptureNode final : public juce::AudioProcessor
 public:
     /** Reserves room for `reserveEvents` events up front (message thread). */
     explicit MidiCaptureNode (std::size_t reserveEvents = 8192)
-        : juce::AudioProcessor (BusesProperties ().withOutput ("Output",
-                                                              juce::AudioChannelSet::stereo (),
-                                                              true))
+        : juce::AudioProcessor (BusesProperties ().withOutput ("Output", juce::AudioChannelSet::stereo (), true))
     {
         captured.events.reserve (reserveEvents);
     }
@@ -519,8 +514,8 @@ public:
         for (const auto meta : midiMessages)
         {
             if (captured.events.size () < captured.events.capacity ())
-                captured.events.push_back (TimedMidiEvent { blockBase + static_cast<std::int64_t> (meta.samplePosition),
-                                                            meta.getMessage () });
+                captured.events.push_back (
+                    TimedMidiEvent { blockBase + static_cast<std::int64_t> (meta.samplePosition), meta.getMessage () });
             else
                 ++dropped;
         }

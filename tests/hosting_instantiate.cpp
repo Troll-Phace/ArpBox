@@ -40,8 +40,11 @@ InstantiationResult instantiateAndWait (PluginInstantiator& instantiator,
     std::atomic<bool> done { false };
     InstantiationResult captured;
 
-    instantiator.instantiate (description, sampleRate, blockSize,
-                              [&] (InstantiationResult result) {
+    instantiator.instantiate (description,
+                              sampleRate,
+                              blockSize,
+                              [&] (InstantiationResult result)
+                              {
                                   captured = std::move (result);
                                   done.store (true, std::memory_order_release);
                               });
@@ -85,7 +88,7 @@ TEST_CASE ("hosting/instantiate: good fake yields a prepared, live instance", "[
         buffer.clear ();
 
         juce::MidiBuffer midi;
-        midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+        midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8)100), 0);
 
         result.instance->processBlock (buffer, midi); // must not crash
 

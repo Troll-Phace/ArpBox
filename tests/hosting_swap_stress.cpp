@@ -78,11 +78,11 @@ TEST_CASE ("hosting/swap: fade-handshake swap under a held note is spike-free an
         const float p = renderBlocks (graph, buffer, midi, 1);
         REQUIRE (allFinite (buffer));
         REQUIRE (std::isfinite (p));
-        REQUIRE (p <= 1.0001f);                    // limiter-bounded throughout
+        REQUIRE (p <= 1.0001f); // limiter-bounded throughout
         maxPeak = juce::jmax (maxPeak, p);
     }
-    REQUIRE (maxPeak > 0.0f);                        // B is live after the swap
-    REQUIRE (maxPeak <= playingPeak + 1.0e-4f);      // no crossfade overshoot / spike
+    REQUIRE (maxPeak > 0.0f);                   // B is live after the swap
+    REQUIRE (maxPeak <= playingPeak + 1.0e-4f); // no crossfade overshoot / spike
 
     // No stuck note: flush + remove returns the slot to silence.
     graph.allNotesOff ();
@@ -92,8 +92,7 @@ TEST_CASE ("hosting/swap: fade-handshake swap under a held note is spike-free an
     REQUIRE (graph.snapshots ().read ().voiceCount == 0);
 }
 
-TEST_CASE ("hosting/swap: seeded load/swap/remove/note churn stays sane and leaves no stuck note",
-           "[hosting-lab]")
+TEST_CASE ("hosting/swap: seeded load/swap/remove/note churn stays sane and leaves no stuck note", "[hosting-lab]")
 {
     const unsigned seed = GENERATE (1u, 1337u, 424242u);
     INFO ("seed = " << seed);

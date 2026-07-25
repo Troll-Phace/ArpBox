@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "file=$(cat /dev/stdin | jq -r '.tool_input.file_path // empty'); case \"$file\" in *.cpp|*.h|*.hpp|*.mm) clang-format -i \"$file\" 2>/dev/null;; esac; exit 0",
+            "command": "command -v jq >/dev/null 2>&1 || { echo \"clang-format hook: jq not found — cannot read hook input\" >&2; exit 2; }; file=$(jq -r '.tool_input.file_path // empty'); case \"$file\" in */JUCE/*) exit 0 ;; *.cpp|*.h|*.hpp|*.mm) ;; *) exit 0 ;; esac; bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/skills/run-lint/lint.sh\" format-file \"$file\" || { echo \"clang-format hook: FAILED on $file — formatting was NOT applied (see error above)\" >&2; exit 2; }",
             "statusMessage": "Auto-formatting C++..."
           }
         ]
@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "file=$(cat /dev/stdin | jq -r '.tool_input.file_path // empty'); case \"$file\" in *.env*|*secret*|*credential*|*Signing.entitlements|*.lock|*-lock.*) echo \"Protected file: $file\" >&2; exit 2;; esac; exit 0"
+            "command": "command -v jq >/dev/null 2>&1 || { echo \"protected-path guard: jq not found — cannot inspect the write target; BLOCKING (fail closed)\" >&2; exit 2; }; file=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // empty') || { echo \"protected-path guard: unparseable hook payload; BLOCKING (fail closed)\" >&2; exit 2; }; case \"$file\" in \"\") echo \"protected-path guard: payload carried no file_path or notebook_path, so the write target cannot be checked against the protected patterns; BLOCKING (fail closed). If a new tool shape needs supporting, extend this hook in .claude/settings.json.\" >&2; exit 2 ;; *.env*|*secret*|*credential*|*Signing.entitlements|*.lock|*-lock.*) echo \"Protected file: $file\" >&2; exit 2 ;; esac; exit 0"
           }
         ]
       }

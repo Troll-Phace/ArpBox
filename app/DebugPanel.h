@@ -35,8 +35,7 @@ namespace arpbox::app
     → MIDI-In node), the same path the real pad/QWERTY UI uses in Phase 17.
 
     MESSAGE-THREAD ONLY. */
-class DebugPanel final : public juce::Component,
-                         private juce::MidiKeyboardState::Listener
+class DebugPanel final : public juce::Component, private juce::MidiKeyboardState::Listener
 {
 public:
     // MESSAGE-THREAD ONLY: builds the controls and starts the vblank read.
@@ -69,12 +68,10 @@ private:
     // On-screen keyboard / QWERTY note-on/off → push onto the engine note queue.
 
     // MESSAGE-THREAD ONLY: queues a note-on for the pressed key.
-    void handleNoteOn (juce::MidiKeyboardState* source,
-                       int midiChannel, int midiNoteNumber, float velocity) override;
+    void handleNoteOn (juce::MidiKeyboardState* source, int midiChannel, int midiNoteNumber, float velocity) override;
 
     // MESSAGE-THREAD ONLY: queues a note-off for the released key.
-    void handleNoteOff (juce::MidiKeyboardState* source,
-                        int midiChannel, int midiNoteNumber, float velocity) override;
+    void handleNoteOff (juce::MidiKeyboardState* source, int midiChannel, int midiNoteNumber, float velocity) override;
 
     // MESSAGE-THREAD ONLY: repopulates the synth combo from the known-plugin list,
     // filtered to instruments (isInstrument). Called at construction and after a
@@ -114,21 +111,20 @@ private:
 
     // ── Controls (push commands) ─────────────────────────────────────────────
     juce::ToggleButton testToneButton { "Test Tone" };
-    juce::Slider frequencySlider;   ///< Tone frequency in Hz.
-    juce::Slider masterGainSlider;  ///< Master gain in dB.
+    juce::Slider frequencySlider;  ///< Tone frequency in Hz.
+    juce::Slider masterGainSlider; ///< Master gain in dB.
     juce::ToggleButton limiterButton { "Safety Limiter" };
     juce::TextButton simulateLossButton { "Simulate Device Loss" };
 
     // ── Transport (DEV-ONLY; the real header transport is Phase 15.3) ─────────
     juce::TextButton playButton { "Play" };
     juce::TextButton stopButton { "Stop" };
-    juce::Slider bpmSlider;                 ///< Tempo in BPM (20..300, §12.1 / Transport).
+    juce::Slider bpmSlider; ///< Tempo in BPM (20..300, §12.1 / Transport).
     juce::Label bpmLabel { {}, "BPM" };
 
     // ── On-screen / QWERTY keyboard (note input → engine note FIFO) ──────────
     juce::MidiKeyboardState keyboardState;
-    juce::MidiKeyboardComponent keyboard { keyboardState,
-                                           juce::MidiKeyboardComponent::horizontalKeyboard };
+    juce::MidiKeyboardComponent keyboard { keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard };
 
     // ── Plugin scan (DEV-ONLY trigger; removed with this panel in Phase 15+) ──
     juce::TextButton scanButton { "Scan Plugins" };
@@ -150,12 +146,12 @@ private:
 
     // ── Synth slot (DEV-ONLY; real Sound-column UI is Phase 17) ──────────────
     // Load/swap/remove a hosted instrument + gain trim, driven through SynthSlot.
-    juce::ComboBox synthList;                                ///< Instruments from the known-plugin list.
+    juce::ComboBox synthList; ///< Instruments from the known-plugin list.
     juce::TextButton loadSynthButton { "Load Synth" };
     juce::TextButton removeSynthButton { "Remove Synth" };
-    juce::Slider synthGainSlider;                            ///< Synth output-gain trim (dB).
+    juce::Slider synthGainSlider; ///< Synth output-gain trim (dB).
     juce::Label synthGainLabel { {}, "Synth dB" };
-    juce::Label synthStatusLabel;                           ///< Current synth name / latency / error.
+    juce::Label synthStatusLabel; ///< Current synth name / latency / error.
 
     // Backing store for `synthList`: index i ⇒ the i-th instrument item's description.
     juce::Array<juce::PluginDescription> instrumentDescriptions;
@@ -169,8 +165,8 @@ private:
     // WHILE a scan is in flight, so a crash mid-scan (hostile in-process AU)
     // preserves the types accumulated so far across a relaunch. Only ever touched
     // on the message thread (startPluginScan + the vblank refresh), so no atomics.
-    int lastSavedTypeCount = 0;        ///< Known-type count at the last periodic save.
-    std::uint32_t lastSaveTimeMs = 0;  ///< Time::getMillisecondCounter() at the last periodic save.
+    int lastSavedTypeCount = 0;       ///< Known-type count at the last periodic save.
+    std::uint32_t lastSaveTimeMs = 0; ///< Time::getMillisecondCounter() at the last periodic save.
 
     // True iff the most recent PluginManager::save() attempt failed (issue #17).
     // PluginManager logs the failure durably; this drives the VISIBLE marker in the
@@ -201,13 +197,13 @@ private:
     // observe "finished"/"not running" with no happens-before on the list the worker
     // built, then persist or display it. The remaining fields are relaxed on purpose:
     // they are only ever read after one of the two flag acquires, which orders them.
-    std::atomic<bool> scanRunning { false };     ///< Worker is inside scanAll(). Release/acquire.
+    std::atomic<bool> scanRunning { false };      ///< Worker is inside scanAll(). Release/acquire.
     std::atomic<bool> scanJustFinished { false }; ///< Worker finished; message thread must save(). Release/acquire.
-    std::atomic<float> scanProgress { 0.0f };    ///< [0,1] progress of the current pass.
-    std::atomic<int> lastScannedTypeCount { 0 }; ///< Types in the list after the last pass.
-    std::atomic<int> lastScanFailedCount { 0 };  ///< Files that failed to load in the last pass.
-    juce::CriticalSection scanNameLock;          ///< Guards currentScanName across threads (non-audio).
-    juce::String currentScanName;                ///< Plugin file currently being scanned.
+    std::atomic<float> scanProgress { 0.0f };     ///< [0,1] progress of the current pass.
+    std::atomic<int> lastScannedTypeCount { 0 };  ///< Types in the list after the last pass.
+    std::atomic<int> lastScanFailedCount { 0 };   ///< Files that failed to load in the last pass.
+    juce::CriticalSection scanNameLock;           ///< Guards currentScanName across threads (non-audio).
+    juce::String currentScanName;                 ///< Plugin file currently being scanned.
 
     // Message-thread synth-slot coordinator (owns the async load + swap state
     // machine). Declared BEFORE the vblank so it is fully constructed before the

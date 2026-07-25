@@ -39,9 +39,7 @@ namespace arpbox::hosting
     audio thread reads). `processBlock` is RT-SAFE — no alloc/lock/log in this
     wrapper's own code. Destruction is on the message thread (the engine's
     removeNode path guarantees it). */
-class HostedPluginNode final
-    : public juce::AudioProcessor
-    , private juce::AudioProcessorListener
+class HostedPluginNode final : public juce::AudioProcessor, private juce::AudioProcessorListener
 {
 public:
     /** Adopts an already-prepared inner instance (ownership transferred). MUST be
@@ -154,9 +152,7 @@ private:
     // it).
     void audioProcessorChanged (juce::AudioProcessor* processor,
                                 const juce::AudioProcessorListener::ChangeDetails& details) override;
-    void audioProcessorParameterChanged (juce::AudioProcessor* processor,
-                                         int parameterIndex,
-                                         float newValue) override;
+    void audioProcessorParameterChanged (juce::AudioProcessor* processor, int parameterIndex, float newValue) override;
 
 public:
     /** MESSAGE-THREAD ONLY: services a deferred latency change that was flagged from
@@ -168,7 +164,6 @@ public:
     void pollPendingLatencyChange () noexcept;
 
 private:
-
     // Negotiates a workable inner output layout; sets fastStereoPath / renderInner /
     // channel counts. MESSAGE-THREAD ONLY. Never asserts-kills.
     void negotiateBusLayout ();
@@ -187,7 +182,7 @@ private:
     // Negotiated inner layout (message thread writes; audio thread reads via flags).
     int innerInChannels = 0;
     int innerOutChannels = 0;
-    bool fastStereoPath = false;          // inner is 0-in / 2-out → render straight into buffer.
+    bool fastStereoPath = false;             // inner is 0-in / 2-out → render straight into buffer.
     std::atomic<bool> renderActive { true }; // false ⇒ negotiation failed; emit silence, never crash.
 
     // Scratch for the non-fast path (preallocated in prepareToPlay; never grown on
@@ -196,8 +191,8 @@ private:
     int scratchChannels = 0;
 
     // Smoothers live on the audio thread; targets are published via atomics.
-    juce::LinearSmoothedValue<float> fadeGain;   // soft-bypass + swap fade.
-    juce::LinearSmoothedValue<float> inputTrim;  // FX seam.
+    juce::LinearSmoothedValue<float> fadeGain;  // soft-bypass + swap fade.
+    juce::LinearSmoothedValue<float> inputTrim; // FX seam.
     juce::LinearSmoothedValue<float> outputTrim;
 
     std::atomic<bool> bypassed { false };

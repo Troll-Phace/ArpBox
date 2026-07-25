@@ -170,9 +170,9 @@ public:
     juce::String describe (int maxPitches = 16) const
     {
         juce::String text;
-        text << "note lifecycle: " << juce::String (noteOns) << " on, " << juce::String (noteOffs)
-             << " off, " << juce::String (allNotesOffSweeps) << " CC123, outstanding "
-             << juce::String (outstanding ()) << ", orphan offs " << juce::String (orphans);
+        text << "note lifecycle: " << juce::String (noteOns) << " on, " << juce::String (noteOffs) << " off, "
+             << juce::String (allNotesOffSweeps) << " CC123, outstanding " << juce::String (outstanding ())
+             << ", orphan offs " << juce::String (orphans);
 
         int shown = 0;
         for (int channel = 1; channel <= numChannels && shown < maxPitches; ++channel)
@@ -183,8 +183,8 @@ public:
                 if (live == 0)
                     continue;
 
-                text << "\n  STILL SOUNDING ch" << juce::String (channel) << " note "
-                     << juce::String (note) << " x" << juce::String (live);
+                text << "\n  STILL SOUNDING ch" << juce::String (channel) << " note " << juce::String (note) << " x"
+                     << juce::String (live);
                 ++shown;
             }
         }
@@ -211,7 +211,7 @@ private:
 
     int& at (int channel, int note) noexcept { return counts[index (channel, note)]; }
 
-    std::array<int, static_cast<std::size_t> (numChannels * numNotes)> counts {};
+    std::array<int, static_cast<std::size_t> (numChannels* numNotes)> counts {};
     std::int64_t noteOns = 0;
     std::int64_t noteOffs = 0;
     std::int64_t orphans = 0;

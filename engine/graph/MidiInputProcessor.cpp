@@ -104,16 +104,14 @@ void MidiInputProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     midi.ensureSize (outgoingWarmupBytes);
 
     const int numSamples = buffer.getNumSamples ();
-    const std::uint16_t mask =
-        control != nullptr ? control->channelMask.load (std::memory_order_relaxed)
-                           : static_cast<std::uint16_t> (0xFFFF);
+    const std::uint16_t mask = control != nullptr ? control->channelMask.load (std::memory_order_relaxed)
+                                                  : static_cast<std::uint16_t> (0xFFFF);
 
     // 1. One-shot all-notes-off flush (message-thread requested). Emit CC123 on
     //    every channel and zero the voice count — a clean flush primitive for
     //    synth swaps/removals (ARCHITECTURE §5.5). The 16 addEvent calls do not
     //    allocate: the outgoing buffer was capacity-warmed above (W2).
-    if (control != nullptr
-        && control->allNotesOffRequested.exchange (false, std::memory_order_acq_rel))
+    if (control != nullptr && control->allNotesOffRequested.exchange (false, std::memory_order_acq_rel))
     {
         for (int ch = 0; ch < 16; ++ch)
         {
@@ -139,8 +137,7 @@ void MidiInputProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
                 if (on && ! channelPasses (mask, e.channel))
                     return;
 
-                const juce::uint8 status = static_cast<juce::uint8> (
-                    (on ? 0x90 : 0x80) | ((e.channel - 1) & 0x0F));
+                const juce::uint8 status = static_cast<juce::uint8> ((on ? 0x90 : 0x80) | ((e.channel - 1) & 0x0F));
                 const juce::uint8 bytes[3] = { status,
                                                static_cast<juce::uint8> (e.note & 0x7F),
                                                static_cast<juce::uint8> (e.velocity & 0x7F) };
@@ -195,9 +192,8 @@ void MidiInputProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
     // 4. Publish the live MIDI-in voice count for the master to snapshot.
     if (control != nullptr)
-        control->voiceCount.store (
-            static_cast<std::uint16_t> (juce::jlimit (0, 0xFFFF, liveVoices)),
-            std::memory_order_relaxed);
+        control->voiceCount.store (static_cast<std::uint16_t> (juce::jlimit (0, 0xFFFF, liveVoices)),
+                                   std::memory_order_relaxed);
 }
 
 // RT-SAFE:
@@ -211,7 +207,6 @@ void MidiInputProcessor::processBlock (juce::AudioBuffer<double>& buffer, juce::
 bool MidiInputProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     // MIDI-only: accept only the empty (no main audio in/out) layout.
-    return layouts.getMainInputChannelSet ().isDisabled ()
-        && layouts.getMainOutputChannelSet ().isDisabled ();
+    return layouts.getMainInputChannelSet ().isDisabled () && layouts.getMainOutputChannelSet ().isDisabled ();
 }
 } // namespace arpbox::engine

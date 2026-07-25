@@ -101,9 +101,8 @@ public:
     /** Scans every format registered on the injected format manager (production:
         VST3 + AU). `rescanExisting == false` is the incremental rescan; true is
         the explicit full rescan. Aggregates failed files across formats. */
-    ScanResult scanAll (bool rescanExisting,
-                        const ProgressCallback& onProgress = {},
-                        const CancelCallback& shouldCancel = {});
+    ScanResult
+    scanAll (bool rescanExisting, const ProgressCallback& onProgress = {}, const CancelCallback& shouldCancel = {});
 
     /** Requests cooperative early-exit from an in-progress scan. The scan loop
         checks this between files, so cancellation is honoured at file granularity.

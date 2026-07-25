@@ -38,7 +38,8 @@ void PluginInstantiator::instantiate (const PluginDescription& description,
         // Deliver asynchronously so EVERY outcome (success or failure) reaches the
         // caller the same way — on the message thread, after instantiate() returns.
         MessageManager::callAsync (
-            [cb = std::move (callback), formatName = description.pluginFormatName]() mutable {
+            [cb = std::move (callback), formatName = description.pluginFormatName] () mutable
+            {
                 cb (InstantiationResult::failure (InstantiationResult::Status::formatUnknown,
                                                   "No registered plugin format named '" + formatName + "'"));
             });
@@ -52,15 +53,15 @@ void PluginInstantiator::instantiate (const PluginDescription& description,
         sampleRate,
         blockSize,
         [cb = std::move (callback), sampleRate, blockSize] (std::unique_ptr<AudioPluginInstance> instance,
-                                                            const String& error) mutable {
+                                                            const String& error) mutable
+        {
             // MESSAGE THREAD.
             if (instance == nullptr)
             {
                 // Failure isolation: a null instance is a typed error, never a
                 // crash or throw. Preserve JUCE's message when it gave us one.
                 cb (InstantiationResult::failure (InstantiationResult::Status::creationFailed,
-                                                  error.isNotEmpty () ? error
-                                                                      : String ("Plugin creation failed")));
+                                                  error.isNotEmpty () ? error : String ("Plugin creation failed")));
                 return;
             }
 

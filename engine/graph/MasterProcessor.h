@@ -50,8 +50,7 @@ namespace arpbox::engine
 
     All sample-rate-dependent DSP state (`dsp::Gain`, `dsp::Limiter`) is prepared
     ONLY in `prepareToPlay`; `processBlock` never allocates, locks, or re-prepares. */
-class MasterProcessor : public juce::AudioProcessor,
-                        public ICommandSink
+class MasterProcessor : public juce::AudioProcessor, public ICommandSink
 {
 public:
     /** Constructs the node with stereo input and stereo output buses. */
@@ -171,9 +170,9 @@ public:
 
 private:
     // Injected, non-owning cross-thread channels (graph-owned).
-    EngineSnapshotBuffer* snapshotBuffer = nullptr;///< Written by this node each block.
-    ToneControl* toneControl = nullptr;            ///< Published to on tone commands.
-    EngineEventQueue* eventQueue = nullptr;        ///< Produced onto by this node (latencyChanged).
+    EngineSnapshotBuffer* snapshotBuffer = nullptr; ///< Written by this node each block.
+    ToneControl* toneControl = nullptr;             ///< Published to on tone commands.
+    EngineEventQueue* eventQueue = nullptr;         ///< Produced onto by this node (latencyChanged).
 
     // Transport source for the snapshot's transport fields (read-only, same thread).
     const Transport* transportSource = nullptr;
@@ -188,9 +187,9 @@ private:
     const std::atomic<std::uint16_t>* voiceCountSource = nullptr;
 
     // Master DSP — prepared in prepareToPlay, read/processed on the audio thread.
-    juce::dsp::Gain<float> outputGain;   ///< Smoothed output gain (dB target).
-    juce::dsp::Limiter<float> limiter;   ///< Brickwall safety limiter.
-    bool limiterEnabled = true;          ///< Audio-thread only; default ON (§7).
+    juce::dsp::Gain<float> outputGain; ///< Smoothed output gain (dB target).
+    juce::dsp::Limiter<float> limiter; ///< Brickwall safety limiter.
+    bool limiterEnabled = true;        ///< Audio-thread only; default ON (§7).
 
     // Cross-thread status level (message thread writes, audio thread reads).
     std::atomic<std::uint8_t> deviceStatus { static_cast<std::uint8_t> (deviceStatusOk) };

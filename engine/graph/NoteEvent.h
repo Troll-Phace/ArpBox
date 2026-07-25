@@ -34,9 +34,9 @@ enum class NoteEventKind : std::uint8_t
 struct NoteEvent
 {
     NoteEventKind kind = NoteEventKind::noteOff; ///< On or off.
-    std::uint8_t note = 0;                        ///< MIDI note number 0..127.
-    std::uint8_t velocity = 0;                    ///< Strike velocity 1..127 (0 for note-off).
-    std::uint8_t channel = 1;                     ///< MIDI channel 1..16.
+    std::uint8_t note = 0;                       ///< MIDI note number 0..127.
+    std::uint8_t velocity = 0;                   ///< Strike velocity 1..127 (0 for note-off).
+    std::uint8_t channel = 1;                    ///< MIDI channel 1..16.
 };
 
 static_assert (std::is_trivially_copyable_v<NoteEvent>,

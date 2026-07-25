@@ -37,8 +37,7 @@ int FakePluginFormat::getCreateInstanceCallCount (const String& identifier) cons
     return it != createInstanceCalls.end () ? it->second : 0;
 }
 
-void FakePluginFormat::findAllTypesForFile (OwnedArray<PluginDescription>& results,
-                                            const String& fileOrIdentifier)
+void FakePluginFormat::findAllTypesForFile (OwnedArray<PluginDescription>& results, const String& fileOrIdentifier)
 {
     // Record the scan-time load attempt. A blacklisted identifier never reaches
     // here (scanAndAddFile short-circuits on the blacklist), which is exactly what
@@ -59,9 +58,7 @@ void FakePluginFormat::findAllTypesForFile (OwnedArray<PluginDescription>& resul
     results.add (new PluginDescription (makeDescription (*spec, getName ())));
 }
 
-StringArray FakePluginFormat::searchPathsForPlugins (const FileSearchPath&,
-                                                     bool,
-                                                     bool)
+StringArray FakePluginFormat::searchPathsForPlugins (const FileSearchPath&, bool, bool)
 {
     // Path is ignored (AU-style). Return every corpus identifier — the crash
     // offender included, so the scanner walks it and reports the failure.
@@ -104,8 +101,7 @@ void FakePluginFormat::createPluginInstance (const PluginDescription& descriptio
 
     if (spec == nullptr)
     {
-        callback (nullptr,
-                  "FakePluginFormat: no fake plugin with identifier '" + description.fileOrIdentifier + "'");
+        callback (nullptr, "FakePluginFormat: no fake plugin with identifier '" + description.fileOrIdentifier + "'");
         return;
     }
 

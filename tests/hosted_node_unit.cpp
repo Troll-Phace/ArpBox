@@ -72,7 +72,7 @@ std::unique_ptr<HostedPluginNode> makePreparedNode (FakeBehavior behavior)
 juce::MidiBuffer noteOnBuffer (int note = 60, int velocity = 100)
 {
     juce::MidiBuffer midi;
-    midi.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) velocity), 0);
+    midi.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8)velocity), 0);
     return midi;
 }
 
@@ -84,7 +84,10 @@ juce::MidiBuffer noteOnBuffer (int note = 60, int velocity = 100)
 class NanEmittingFake final : public FakePluginInstance
 {
 public:
-    NanEmittingFake () : FakePluginInstance (specFor (FakeBehavior::baseline)) {}
+    NanEmittingFake ()
+        : FakePluginInstance (specFor (FakeBehavior::baseline))
+    {
+    }
 
     void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override
     {
@@ -112,8 +115,7 @@ class MonoInstrumentFake final : public juce::AudioPluginInstance
 {
 public:
     MonoInstrumentFake ()
-        : juce::AudioPluginInstance (
-              BusesProperties ().withOutput ("Output", juce::AudioChannelSet::mono (), true))
+        : juce::AudioPluginInstance (BusesProperties ().withOutput ("Output", juce::AudioChannelSet::mono (), true))
     {
     }
 
@@ -122,8 +124,8 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override
     {
         // Only 0-in / mono-out: refusing stereo forces the wrapper to negotiate mono.
-        return layouts.getMainInputChannels () == 0
-            && layouts.getMainOutputChannelSet () == juce::AudioChannelSet::mono ();
+        return layouts.getMainInputChannels () == 0 &&
+               layouts.getMainOutputChannelSet () == juce::AudioChannelSet::mono ();
     }
 
     void prepareToPlay (double, int) override {}
@@ -232,8 +234,8 @@ TEST_CASE ("hosting/hosted-node: mono inner is fanned to both stereo outputs", "
 
     const float l = buffer.getMagnitude (0, 0, buffer.getNumSamples ());
     const float r = buffer.getMagnitude (1, 0, buffer.getNumSamples ());
-    REQUIRE (l > 0.0f);   // mono content reached the left output
-    REQUIRE (r == l);     // ...and was duplicated to the right bit-for-bit (exact copy)
+    REQUIRE (l > 0.0f); // mono content reached the left output
+    REQUIRE (r == l);   // ...and was duplicated to the right bit-for-bit (exact copy)
 }
 
 TEST_CASE ("hosting/hosted-node: latency mirrors the inner's reported value", "[unit]")

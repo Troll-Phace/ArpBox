@@ -75,12 +75,14 @@ TEST_CASE ("infra/spsc-fifo: churn across the wrap boundary keeps order", "[unit
         // Drain a smaller amount than we pushed on average, so occupancy walks up
         // and the cursors wrap. Values must arrive strictly in push order.
         bool ok = true;
-        fifo.drain ([&] (const std::uint32_t& v) noexcept {
-            if (v != nextExpected)
-                ok = false;
-            ++nextExpected;
-            ++consumed;
-        });
+        fifo.drain (
+            [&] (const std::uint32_t& v) noexcept
+            {
+                if (v != nextExpected)
+                    ok = false;
+                ++nextExpected;
+                ++consumed;
+            });
         REQUIRE (ok);
     }
 
@@ -88,12 +90,14 @@ TEST_CASE ("infra/spsc-fifo: churn across the wrap boundary keeps order", "[unit
     // Flag-then-assert: a REQUIRE inside a noexcept drain lambda would std::terminate
     // (not report) on mismatch, so capture the result and assert after draining.
     bool tailOrdered = true;
-    fifo.drain ([&] (const std::uint32_t& v) noexcept {
-        if (v != nextExpected)
-            tailOrdered = false;
-        ++nextExpected;
-        ++consumed;
-    });
+    fifo.drain (
+        [&] (const std::uint32_t& v) noexcept
+        {
+            if (v != nextExpected)
+                tailOrdered = false;
+            ++nextExpected;
+            ++consumed;
+        });
     REQUIRE (tailOrdered);
 
     REQUIRE (consumed == nextToPush);
@@ -115,8 +119,8 @@ TEST_CASE ("infra/spsc-fifo: overflow drops and increments the drop count", "[un
         ++pushed;
 
     REQUIRE (pushed > 0);
-    REQUIRE (fifo.getNumReady () == pushed);        // every accepted item is ready
-    REQUIRE (fifo.getNumReady () <= 8);             // never exceeds nominal capacity
+    REQUIRE (fifo.getNumReady () == pushed); // every accepted item is ready
+    REQUIRE (fifo.getNumReady () <= 8);      // never exceeds nominal capacity
 
     const std::uint64_t baseDrops = fifo.getDroppedCount ();
     REQUIRE (baseDrops >= 1); // the failed push that ended the fill loop counted
@@ -175,9 +179,7 @@ TEST_CASE ("infra/command-queue: POD commands round-trip intact", "[unit]")
 
     std::array<EngineCommand, 3> out {};
     int n = 0;
-    queue.drain ([&out, &n] (const EngineCommand& cmd) noexcept {
-        out[static_cast<std::size_t> (n++)] = cmd;
-    });
+    queue.drain ([&out, &n] (const EngineCommand& cmd) noexcept { out[static_cast<std::size_t> (n++)] = cmd; });
 
     REQUIRE (n == 3);
     REQUIRE (out[0].type == EngineCommandType::setMasterGainDb);
@@ -208,9 +210,7 @@ TEST_CASE ("infra/event-queue: discrete events round-trip intact", "[unit]")
 
     std::array<EngineEvent, 2> out {};
     int n = 0;
-    queue.drain ([&out, &n] (const EngineEvent& e) noexcept {
-        out[static_cast<std::size_t> (n++)] = e;
-    });
+    queue.drain ([&out, &n] (const EngineEvent& e) noexcept { out[static_cast<std::size_t> (n++)] = e; });
 
     REQUIRE (n == 2);
     REQUIRE (out[0].type == EngineEventType::sampleRateChanged);
