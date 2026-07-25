@@ -192,13 +192,16 @@ void SequencerProcessor::releaseResources ()
 }
 
 // RT-SAFE:
-SequencerProcessor::StepEmission SequencerProcessor::describeStep (std::int64_t stepIndex) const noexcept
+StepEmission evaluateStep (const PatternSnapshot& snapshot, int patternIndex, std::int64_t stepIndex) noexcept
 {
     // ── L0 NOTE POOL → L1 PATTERN CORE (§5.1) ────────────────────────────────
-    // A pure function of `stepIndex` plus two values fixed for the whole block
-    // (`activeSnapshot`, `activePatternIndex`). No cursor, no accumulator: that is
-    // what makes §9's offline drag-out render bit-identical to real time, and what
-    // lets the transport be located anywhere without the arpeggio shifting.
+    // A PURE function of the three parameters — no cursor, no accumulator, and (by
+    // construction, being a free function) no access to any `SequencerProcessor`
+    // member at all. That is what makes §9's offline drag-out render bit-identical
+    // to real time, what lets the transport be located anywhere without the
+    // arpeggio shifting, and what makes `cutoffForSamePitch`'s lookahead sound.
+    // See "THE PURITY OF THE EMISSION CORE IS STRUCTURAL" in the header before
+    // adding anything here that is not derived from these three arguments.
     //
     // LANES READ HERE (Phase 6): GATE, PITCH, OCT, VEL, LEN.
     // LANES STORED BUT NOT READ, and by whom they will be:
@@ -208,10 +211,7 @@ SequencerProcessor::StepEmission SequencerProcessor::describeStep (std::int64_t 
     // The omission is deliberate, not an oversight — see LaneId in PatternTypes.h,
     // which carries the same per-lane phase annotations.
 
-    if (activeSnapshot == nullptr)
-        return {}; // nothing adopted yet ⇒ silence (gate defaults to false)
-
-    const PatternData& data = activeSnapshot->pattern (activePatternIndex);
+    const PatternData& data = snapshot.pattern (patternIndex);
 
     // GATE: a true clock divider (`isLaneTick`) AND a non-zero held value. This is the
     // SAME predicate `gatePrefixPulses` was summed from, so the fired steps and the
@@ -222,11 +222,11 @@ SequencerProcessor::StepEmission SequencerProcessor::describeStep (std::int64_t 
     // The pool size is clamped even though `PatternDocument::setPool` already clamps:
     // this dereferences a fixed-size array on the audio thread from data that arrived
     // through a pointer swap, and a guard is cheaper than a corrupted read.
-    const int poolSize = juce::jmin (maxPoolSize, static_cast<int> (activeSnapshot->pool.size));
+    const int poolSize = juce::jmin (maxPoolSize, static_cast<int> (snapshot.pool.size));
 
     // Which pool DEGREE this step lands on: the gated ordinal run through the
     // pre-built traversal table for the active direction mode (§12.3).
-    const int poolIndex = activeSnapshot->poolIndexAt (data, stepIndex, poolSize);
+    const int poolIndex = snapshot.poolIndexAt (data, stepIndex, poolSize);
 
     if (poolIndex < 0)
         return {}; // empty pool / degenerate traversal — the caller must not emit
@@ -235,11 +235,11 @@ SequencerProcessor::StepEmission SequencerProcessor::describeStep (std::int64_t 
     // wraps it through the pool with octave carry, so the pattern keeps working when
     // the held chord changes size. OCT is the straight ±4-octave transpose on top.
     const int degree = poolIndex + laneValueAt (laneOf (data, LaneId::pitch), stepIndex);
-    const int poolNote = poolNoteAtDegree (poolNotes (activeSnapshot->pool, data.asPlayedView), poolSize, degree);
+    const int poolNote = poolNoteAtDegree (poolNotes (snapshot.pool, data.asPlayedView), poolSize, degree);
 
     StepEmission emission;
     emission.gate = true;
-    emission.channel = activeSnapshot->outputChannel;
+    emission.channel = snapshot.outputChannel;
 
     // Neither of these is range-clamped here: `poolNoteAtDegree` deliberately leaves
     // fold-vs-clamp to the constraint gate (Phase 12.3), and `emitStep` applies the
@@ -285,8 +285,8 @@ std::int64_t SequencerProcessor::cutoffForSamePitch (std::int64_t stepIndex,
     {
         const std::int64_t index = stepIndex + ahead;
 
-        // STOP AT A RESOLVED PATTERN SWITCH. `describeStep` reads
-        // `activePatternIndex`, so from the adopt step onwards it would describe the
+        // STOP AT A RESOLVED PATTERN SWITCH. This scan passes `activePatternIndex`
+        // to `evaluateStep`, so from the adopt step onwards it would describe the
         // OUTGOING pattern's lanes for steps the INCOMING pattern will play. Nothing
         // is lost by stopping: `flushForPatternSwitch` releases this note at
         // `adoptSample - 1` anyway, which is at or before any cutoff we could have
@@ -302,7 +302,10 @@ std::int64_t SequencerProcessor::cutoffForSamePitch (std::int64_t stepIndex,
         if (boundary > naturalDueSample)
             break;
 
-        const StepEmission next = describeStep (index);
+        // THE PREDICTION. `evaluateStep` is a free function taking exactly the three
+        // things a step depends on, so peeking at a FUTURE index here cannot disturb
+        // (or be disturbed by) the emitting walk — see issue #53 in the header.
+        const StepEmission next = evaluateStep (*activeSnapshot, activePatternIndex, index);
 
         if (! next.gate)
             continue;
@@ -658,7 +661,7 @@ void SequencerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     //
     //    WHY THE BLOCK HEAD AND NOT THE FIRST STEP BOUNDARY. §4 step 3 says "adopt at
     //    that sample offset", and here the two are observationally identical: the only
-    //    in-block readers of the snapshot are `describeStep` and the grid, and both sit
+    //    in-block readers of the snapshot are `evaluateStep` and the grid, and both sit
     //    downstream of this point. Adopting here additionally keeps `gridStepPpq`
     //    unambiguous for the whole walk — adopting mid-block could otherwise change the
     //    step length underneath a half-finished step index range.
@@ -773,7 +776,16 @@ void SequencerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
                 clearPendingSwitch ();
             }
 
-            emitStep (describeStep (index),
+            // THE EMISSION CORE, called with exactly the three inputs it is allowed
+            // to see (issue #53). `activeSnapshot` can still be null here — nothing
+            // has been adopted yet — and a default `StepEmission` has `gate == false`,
+            // so `emitStep` no-ops, which is what the old null-check inside the core
+            // did. The switch above cannot have fired in that case either
+            // (`resolvePendingSwitch` returns early on a null snapshot).
+            const StepEmission emission =
+                activeSnapshot != nullptr ? evaluateStep (*activeSnapshot, activePatternIndex, index) : StepEmission {};
+
+            emitStep (emission,
                       midi,
                       index,
                       offset,

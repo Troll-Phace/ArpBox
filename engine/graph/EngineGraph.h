@@ -25,6 +25,39 @@
 
 namespace arpbox::engine
 {
+/** The highest sample rate ARPBOX supports, in Hz (issue #56).
+
+    THIS IS A CORRECTNESS BOUND, NOT A TASTE PREFERENCE. The sequencer's
+    step-index snap window (SequencerProcessor.h, "THE SNAP-BOUNDARY WINDOW",
+    issue #37) is what makes step emission buffer-size independent, and its width
+    scales linearly with the sample rate:
+
+        window (samples) = stepIndexSnapSteps x stepPpq x (60 / bpm) x sampleRate
+                         = 1e-6 x stepPpq x 60 x sampleRate / bpm
+
+    The documented invariant is that the window stays BELOW one sample, so a
+    boundary inside it lands at most one sample late and the effect can never
+    compound. Evaluated at the worst supported combination — the coarsest grid
+    (§2.1: 1/32..1/4 with triplet/dotted, so a dotted quarter, stepPpq = 1.5) at
+    `Transport::minBpm` (20) — the window is:
+
+        192 kHz  ->  1e-6 x 1.5 x (60/20) x 192000 = 0.864 samples   (13.6% headroom)
+        384 kHz  ->  1e-6 x 1.5 x (60/20) x 384000 = 1.728 samples   (INVARIANT BROKEN)
+
+    384 kHz is not hypothetical — DXD interfaces exist and CoreAudio will happily
+    negotiate them. Nothing in the engine caps the rate on its own (the only other
+    guards in the tree are non-positive floors substituting 44100 in
+    Transport.cpp, EngineGraph.cpp and app/SynthSlot.cpp), so the ceiling is
+    enforced at the one place the rate is chosen: `app::AudioEngine`, which
+    down-negotiates a device above this rate and refuses it outright if the device
+    offers nothing at or below it. See `AudioEngine::enforceSampleRateCeiling`.
+
+    RAISING THIS VALUE IS A CONTRACT CHANGE: re-derive the table above first (and
+    the one in SequencerProcessor.h), or close the window structurally per #37
+    option (a). Doubling it to 384000.0 alone makes the sequencer's buffer-size
+    independence claim false. */
+inline constexpr double kMaxSupportedSampleRate = 192000.0;
+
 /** Owner and assembler of the root `AudioProcessorGraph` and the three canonical
     cross-thread channels (ARCHITECTURE §3.3, §3.4).
 
@@ -156,15 +189,28 @@ public:
     /** The editable pattern model; edits reach the audio thread as snapshots. */
     PatternDocument& patterns () noexcept { return patternDocument; }
 
-    // MESSAGE-THREAD ONLY (observation): `reclaim()` / `peekPending()` / the counters.
-    // HEADLESS TESTS ONLY — they drive both sides of the channel by hand, with no real
-    // audio thread. The channel's `adopt` / `retire` are the AUDIO thread's half of a
-    // strict SPSC pair and its `publish` belongs to the document; calling any of the
-    // three through this handle while audio is running breaks the single-producer /
-    // single-consumer contract. App code uses the three narrow methods below and
-    // `patterns()`, never this.
-    /** The pattern publish/adopt/retire channel. Tests only — see the threading note. */
-    PatternChannel& patternSnapshots () noexcept { return patternChannel; }
+    // MESSAGE-THREAD ONLY (OBSERVATION ONLY — the reference is `const`, issue #57).
+    //
+    // WHY CONST, AND WHAT IT BUYS: `PatternChannel` is a strict SPSC channel whose
+    // three mutating methods each belong to exactly ONE thread — `adopt()` / `retire()`
+    // to the AUDIO thread (they are the sequencer node's half of the pair) and
+    // `publish()` to the MESSAGE thread, reached only through `patterns()`, whose
+    // document owns the publish target. A message-thread caller reaching those through
+    // the graph would put two producers on the retirement queue and two consumers on
+    // the publish slot. All three are non-const, so handing out a `const&` makes that
+    // misuse a COMPILE ERROR rather than a documented prohibition — the same barrier
+    // #39 put on `getTransport()`, for the same reason.
+    //
+    // What remains reachable is exactly the observation surface: `peekPending()`,
+    // `getNumPendingRetirements()`, `getDroppedRetirementCount()`. The one legitimate
+    // message-thread mutation — reclamation — has its own narrow entry point below
+    // (`reclaimRetiredPatterns()`), and publishing goes through `patterns()`.
+    //
+    // Headless tests that need to drive publish/adopt/retire by hand own their OWN
+    // `PatternChannel` (see tests/support/SequencerRenderRig.h); they do not, and must
+    // not, borrow the graph's.
+    /** Read-only view of the pattern publish/adopt/retire channel (observation only). */
+    const PatternChannel& patternSnapshots () const noexcept { return patternChannel; }
 
     // MESSAGE-THREAD ONLY: deletes every `PatternSnapshot` the audio thread has
     // retired. THE APP MUST CALL THIS ON ITS UI TICK (`DebugPanel::refreshFromEngine`

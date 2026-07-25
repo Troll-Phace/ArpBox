@@ -180,6 +180,24 @@ add_executable(arpbox_tests
     # region where nothing adopted proves nothing). Also the standing guard on the
     # outgoing MidiBuffer's 8192-byte warm-up: two flushes in one block must not grow it.
     pattern_alloc_guard.cpp
+    # step_purity: issue #53's BEHAVIOURAL enforcement. `evaluateStep` is a free
+    # function so no SequencerProcessor member is reachable from it (the compile-time
+    # half); this file covers what the type system cannot see — a file-scope /
+    # function-local static, a thread_local, a memo — by demanding that an in-order
+    # reference sweep come back identical under repeated, reversed, shuffled,
+    # interleaved and lookahead-shaped call orders. The retrigger lookahead
+    # (`cutoffForSamePitch`, the #46 fix) predicts future steps, so an impure core
+    # silently reintroduces the #36/#46/#48 buffer-size-dependent class one level up.
+    step_purity.cpp
+    # boundary_agreement: issue #54's enforcement. `stepBoundarySample` (the #46 fix,
+    # deliberately unclamped) and the step-boundary walk in `processBlock` are TWO
+    # WRITINGS of one snap-then-floor convention; they agree today and nothing pinned
+    # that they continue to. This sweep puts both derivations of the SAME boundary
+    # into the emitted stream — the walk places the note-on, `cutoffForSamePitch`
+    # places the previous note-off one sample earlier — so a single-sided edit (the
+    # per-pattern grid #54 names) reddens instead of resurrecting #36/#46/#48 one
+    # level up.
+    boundary_agreement.cpp
     # pattern_determinism: the REPRODUCIBLE half of §1.2, distinct from the
     # buffer-size-independent half transport_timing.cpp covers — two fresh renders of
     # one configuration are byte-identical, which is what catches hidden global state.

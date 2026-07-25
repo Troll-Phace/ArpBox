@@ -14,6 +14,8 @@
 # Usage:
 #   lint.sh tidy [--reconfigure] [-j N]   clang-tidy over the ARPBOX sources (default)
 #   lint.sh format                        clang-format --dry-run --Werror (CHECK only)
+#                                         over tracked AND untracked-but-not-ignored
+#                                         sources (issue #58)
 #   lint.sh format-fix                    clang-format -i over the whole tree
 #   lint.sh format-file <path>...         clang-format -i on specific files
 #                                         (this is what the PostToolUse hook in
@@ -124,11 +126,30 @@ tracked_sources() {
     git ls-files -- "${TRACKED_PATTERNS[@]}"
 }
 
-# tracked_sources_z <dir>...  — NUL-delimited, for `xargs -0` (issue #43: a path
+# format_sources_z <dir>...  — NUL-delimited, for `xargs -0` (issue #43: a path
 # containing whitespace must reach the tool as ONE argument, not two).
-tracked_sources_z() {
+#
+# TRACKED **PLUS** UNTRACKED-BUT-NOT-IGNORED (issue #58). Plain `git ls-files`
+# enumerates the INDEX, so a source that had not been `git add`ed yet was never
+# format-checked and `lint.sh format` still exited 0 — a false green. The window is
+# narrow (the PostToolUse hook formats on write, so agent- and editor-created files
+# are already clean, and CI only ever sees tracked files) but it is exactly the
+# no-op-gate shape #30 was, so it is closed rather than documented.
+#
+# `--others` adds precisely what `git status` would call untracked, and
+# `--exclude-standard` keeps .gitignore / .git/info/exclude / the global excludes as
+# the sole authority on what is ignored — WHAT COUNTS AS IGNORED IS UNCHANGED, which
+# is what keeps build-*/ and JUCE/ out. `--cached` and `--others` are disjoint by
+# git's own definition (`--others` means "not in the index"), so one invocation
+# yields no duplicates and needs no dedup pass.
+#
+# NOT APPLIED TO THE TIDY ENUMERATION, deliberately: `check_tidy_coverage` compares
+# git's view against the COMPILE DATABASE, and an untracked .cpp is legitimately
+# absent from a CMakeLists until it is added. Folding untracked files in there would
+# manufacture coverage holes instead of finding them, turning #42's gate into noise.
+format_sources_z() {
     _tracked_patterns "$@"
-    git ls-files -z -- "${TRACKED_PATTERNS[@]}"
+    git ls-files -z --cached --others --exclude-standard -- "${TRACKED_PATTERNS[@]}"
 }
 
 ensure_compile_db() {
@@ -293,13 +314,15 @@ run_format() {
 WARN
         [[ "${ARPBOX_ALLOW_FORMAT_FIX:-0}" == "1" ]] || return 2
         # NUL-delimited: a path with a space must arrive as one argument (#43).
-        tracked_sources_z "${FORMAT_DIRS[@]}" | xargs -0 "$fmt_bin" -i
+        format_sources_z "${FORMAT_DIRS[@]}" | xargs -0 "$fmt_bin" -i
         return $?
     fi
 
     # Check mode. This is the gate: --Werror makes any drift a non-zero exit, and
-    # CI's format job is blocking on it, so the tree cannot drift again (#30).
-    tracked_sources_z "${FORMAT_DIRS[@]}" | xargs -0 "$fmt_bin" --dry-run --Werror
+    # CI's format job is blocking on it, so the tree cannot drift again (#30). The
+    # file set includes untracked-but-not-ignored sources (#58), so a file created
+    # outside the write hook can no longer pass through unchecked.
+    format_sources_z "${FORMAT_DIRS[@]}" | xargs -0 "$fmt_bin" --dry-run --Werror
 }
 
 # format-file <path>...  — in-place format of specific files. Used by the

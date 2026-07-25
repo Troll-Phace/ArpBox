@@ -61,6 +61,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
+#include <string>
 #include <vector>
 
 using arpbox::engine::EngineCommandType;
@@ -674,13 +676,12 @@ TEST_CASE ("sequencer/pattern-switch: the switch boundary is buffer-size indepen
     // the same switch with a 150% gate, where the flush really fires — and it
     // deliberately asserts LESS.
     //
-    // ── A DEFECT THIS CASE ONCE PINNED WITHOUT FREEZING — NOW FIXED (#46/#48) ──
-    // WHY THE ASSERTIONS BELOW ARE LOOSER THAN THE ENGINE NOW GUARANTEES. When this
-    // case was written, `flushForPatternSwitch` placed the flush at a WITHIN-BLOCK
-    // `jmax (0, offset - 1)`. That is one sample before the adopt point — so the
-    // outgoing note is released before the incoming note-on — except when the adopt
-    // point landed at block OFFSET 0, where the `jmax` collapsed the gap onto the
-    // boundary. Whether it collapsed was decided by the DEVICE BUFFER SIZE, making
+    // ── THE DEFECT THIS CASE PINS, AND HOW IT CAME TO PIN IT (#46/#48/#66) ────
+    // When this case was written, `flushForPatternSwitch` placed the flush at a
+    // WITHIN-BLOCK `jmax (0, offset - 1)`. That is one sample before the adopt point —
+    // so the outgoing note is released before the incoming note-on — except when the
+    // adopt point landed at block OFFSET 0, where the `jmax` collapsed the gap onto
+    // the boundary. Whether it collapsed was decided by the DEVICE BUFFER SIZE, making
     // the emitted MIDI buffer-size dependent by one sample: the same family as #36,
     // and a §1.2 violation that had to be settled before any golden containing a
     // pattern switch with overlapping gates was baked.
@@ -690,23 +691,39 @@ TEST_CASE ("sequencer/pattern-switch: the switch boundary is buffer-size indepen
     // `processBlock` PRE-FLUSHES from the previous block when `adoptSample - 1` lies
     // there — so there is no offset-0 collapse left to hit (see the residual-case note
     // on `SequencerProcessor::flushForPatternSwitch`, which a `bar`-quantized switch
-    // like this one cannot reach). The window is closed: at the time of writing all
-    // ten swept sizes report the sweep one sample early, and none on the boundary.
+    // like this one cannot reach).
     //
-    // The assertions were written to stay green on BOTH sides of that fix, and they
-    // have deliberately not been tightened here — they still assert only the parts
-    // that were invariant even while the defect stood (the adopt point, the event
-    // count, the flush count, and that the flush never lands AFTER the boundary),
-    // bounding the sweep to a one-sample window rather than pinning it. Pinning it to
-    // exactly `expectedBoundary - 1` is a real strengthening now available, and is
-    // left as a separate change so it can be verified fails-without on its own.
+    // ── WHY THE PLACEMENT IS NOW PINNED RATHER THAN OBSERVED (issue #66) ──────
+    // While #46/#48 were open, this case DELIBERATELY asserted less: it bounded the
+    // sweep to the one-sample window `[expectedBoundary - 1, expectedBoundary]` and
+    // merely COUNTED which end each block size landed on, surfacing the tally through
+    // an `INFO`. Nothing about the placement could turn the case red.
+    //
+    // That is this phase's signature failure mode, and it cost twice: it is how #48
+    // hid behind three adjacent tests, and how #51 hid behind an `INFO`. A test that
+    // observes a defect without failing on it is a test that certifies the defect.
+    // So the counters below are now ASSERTED, exactly, across all ten swept sizes:
+    // every one must report the flush at `expectedBoundary - 1`, and none anywhere
+    // else. The window bound is kept as the localising check — it tells a future
+    // reader whether a failure is a one-sample regression of the #46/#48 family or
+    // something structurally worse — but it is no longer the strongest statement here.
+    //
+    // Verified fails-without: reverting the #48 pre-flush in
+    // `SequencerProcessor::processBlock` (step 4) moves the flush onto the boundary at
+    // every swept size and this case goes red on `sweepsOneSampleEarly == 10`.
     constexpr int longGate = 150;
     constexpr std::int64_t expectedBoundary = 16 * stepSamples; // `bar` from PPQ 2.56
 
     std::int64_t referenceBoundary = -1;
     std::size_t referenceEventCount = 0;
+
+    // The placement tally. Each counter tests the flush sample against an ABSOLUTE
+    // literal, so the assertions after the loop stand on their own rather than
+    // needing the in-loop window bound to complete them.
     int sweepsOnBoundary = 0;
     int sweepsOneSampleEarly = 0;
+    int sweepsElsewhere = 0;
+    std::string firstMisplaced; // "<block size>: <sample>" for the first offender
 
     for (const int blockSize : sweptBlockSizes)
     {
@@ -741,10 +758,24 @@ TEST_CASE ("sequencer/pattern-switch: the switch boundary is buffer-size indepen
         REQUIRE (sweeps[0].absoluteSample <= expectedBoundary);
         REQUIRE (sweeps[0].absoluteSample >= expectedBoundary - 1);
 
-        if (sweeps[0].absoluteSample == expectedBoundary)
-            ++sweepsOnBoundary;
-        else
+        // Tallied, not asserted, inside the sweep (house rule: no Catch2 macros in a
+        // sweep loop — aggregate, then assert). Each arm is an absolute-sample
+        // literal comparison, so `sweepsElsewhere` catches a placement that escaped
+        // the window entirely even though the bound above would have caught it first.
+        if (sweeps[0].absoluteSample == expectedBoundary - 1)
+        {
             ++sweepsOneSampleEarly;
+        }
+        else
+        {
+            if (sweeps[0].absoluteSample == expectedBoundary)
+                ++sweepsOnBoundary;
+            else
+                ++sweepsElsewhere;
+
+            if (firstMisplaced.empty ())
+                firstMisplaced = std::to_string (blockSize) + ": " + std::to_string (sweeps[0].absoluteSample);
+        }
 
         if (referenceBoundary < 0)
         {
@@ -760,10 +791,25 @@ TEST_CASE ("sequencer/pattern-switch: the switch boundary is buffer-size indepen
         }
     }
 
-    // Recorded so the reader can see WHERE the window sits. While #46/#48 stood the
-    // sweep landed in both places across the swept sizes; since the fix it is 0 on the
-    // boundary and 10 one sample early. This total is the non-vacuity check only —
-    // the placement itself is asserted per-size above.
-    INFO ("flush on the boundary: " << sweepsOnBoundary << ", one sample early: " << sweepsOneSampleEarly);
-    REQUIRE (sweepsOnBoundary + sweepsOneSampleEarly == 10);
+    // ── THE PLACEMENT, PINNED (issue #66) ────────────────────────────────────
+    // While #46/#48 stood, the sweep landed in BOTH places across the swept sizes and
+    // this tally was surfaced through an `INFO` that could not fail. Since the fix the
+    // placement is a single value at every buffer size, so it is asserted as one:
+    // all ten swept sizes release the outgoing note at `expectedBoundary - 1`, the
+    // sample before the incoming pattern's first note-on, and none of them anywhere
+    // else.
+    INFO ("flush on the boundary: " << sweepsOnBoundary << ", one sample early: " << sweepsOneSampleEarly
+                                    << ", outside the window: " << sweepsElsewhere);
+    INFO ("first misplaced (block size: sample): " << (firstMisplaced.empty () ? "none" : firstMisplaced));
+    INFO ("expectedBoundary " << expectedBoundary << ", so the pinned flush sample is " << (expectedBoundary - 1));
+
+    // Non-vacuity first: every swept size really was measured. Without this the three
+    // assertions below would all hold on an empty sweep.
+    REQUIRE (sweepsOnBoundary + sweepsOneSampleEarly + sweepsElsewhere == 10);
+    REQUIRE (static_cast<int> (std::size (sweptBlockSizes)) == 10);
+
+    // THE ASSERTION THIS CASE EXISTS FOR.
+    REQUIRE (sweepsOneSampleEarly == 10);
+    REQUIRE (sweepsOnBoundary == 0);
+    REQUIRE (sweepsElsewhere == 0);
 }
