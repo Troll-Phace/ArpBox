@@ -2,6 +2,7 @@
 #pragma once
 
 #include "AudioEngine.h"
+#include "SynthSlot.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -28,8 +29,14 @@ namespace arpbox::app
     The 60 fps read uses `juce::VBlankAttachment`, NOT `juce::Timer` (prohibited —
     see .claude/rules/code-style.md).
 
+    A `juce::MidiKeyboardComponent` gives on-screen click AND computer-keyboard
+    (QWERTY) note input: its `MidiKeyboardState::Listener` callbacks push
+    `NoteEvent`s onto the engine's lock-free note queue (message thread → note FIFO
+    → MIDI-In node), the same path the real pad/QWERTY UI uses in Phase 17.
+
     MESSAGE-THREAD ONLY. */
-class DebugPanel final : public juce::Component
+class DebugPanel final : public juce::Component,
+                         private juce::MidiKeyboardState::Listener
 {
 public:
     // MESSAGE-THREAD ONLY: builds the controls and starts the vblank read.
@@ -55,8 +62,28 @@ public:
 
 private:
     // MESSAGE-THREAD ONLY (vblank): reads the newest snapshot, drains events, and
-    // refreshes the meter / status / starvation readouts.
+    // refreshes the meter / status / starvation / voice readouts.
     void refreshFromEngine ();
+
+    // ── MidiKeyboardState::Listener (message thread) ─────────────────────────
+    // On-screen keyboard / QWERTY note-on/off → push onto the engine note queue.
+
+    // MESSAGE-THREAD ONLY: queues a note-on for the pressed key.
+    void handleNoteOn (juce::MidiKeyboardState* source,
+                       int midiChannel, int midiNoteNumber, float velocity) override;
+
+    // MESSAGE-THREAD ONLY: queues a note-off for the released key.
+    void handleNoteOff (juce::MidiKeyboardState* source,
+                        int midiChannel, int midiNoteNumber, float velocity) override;
+
+    // MESSAGE-THREAD ONLY: repopulates the synth combo from the known-plugin list,
+    // filtered to instruments (isInstrument). Called at construction and after a
+    // scan completes.
+    void refreshSynthList ();
+
+    // MESSAGE-THREAD ONLY: refreshes the synth-slot status readout (name / latency /
+    // pending / error) from the SynthSlot.
+    void refreshSynthStatus ();
 
     // MESSAGE-THREAD ONLY: kicks off the background plugin scan (dev-only trigger).
     void startPluginScan ();
@@ -83,6 +110,11 @@ private:
     juce::ToggleButton limiterButton { "Safety Limiter" };
     juce::TextButton simulateLossButton { "Simulate Device Loss" };
 
+    // ── On-screen / QWERTY keyboard (note input → engine note FIFO) ──────────
+    juce::MidiKeyboardState keyboardState;
+    juce::MidiKeyboardComponent keyboard { keyboardState,
+                                           juce::MidiKeyboardComponent::horizontalKeyboard };
+
     // ── Plugin scan (DEV-ONLY trigger; removed with this panel in Phase 15+) ──
     juce::TextButton scanButton { "Scan Plugins" };
     juce::TextButton cancelScanButton { "Cancel Scan" };
@@ -94,10 +126,23 @@ private:
     juce::Label deviceLabel;      ///< Active device name / SR / buffer.
     juce::Label statusBanner;     ///< Device-status banner (OK / fell back / dead).
     juce::Label meterLabel;       ///< Peak / RMS in dB.
+    juce::Label voiceLabel;       ///< Live MIDI-in voice count (snapshot.voiceCount).
     juce::Label blockLabel;       ///< Block counter + STARVED indicator.
     juce::Label eventLabel;       ///< Last drained engine event + dropped-command count.
     juce::Label pluginCountLabel; ///< Known-plugin count (confirms list restored across launches).
     juce::Label scanStatusLabel;  ///< Scan idle / progress % + current file / last result.
+
+    // ── Synth slot (DEV-ONLY; real Sound-column UI is Phase 17) ──────────────
+    // Load/swap/remove a hosted instrument + gain trim, driven through SynthSlot.
+    juce::ComboBox synthList;                                ///< Instruments from the known-plugin list.
+    juce::TextButton loadSynthButton { "Load Synth" };
+    juce::TextButton removeSynthButton { "Remove Synth" };
+    juce::Slider synthGainSlider;                            ///< Synth output-gain trim (dB).
+    juce::Label synthGainLabel { {}, "Synth dB" };
+    juce::Label synthStatusLabel;                           ///< Current synth name / latency / error.
+
+    // Backing store for `synthList`: index i ⇒ the i-th instrument item's description.
+    juce::Array<juce::PluginDescription> instrumentDescriptions;
 
     std::uint64_t lastBlockCounter = 0; ///< For starvation detection frame-over-frame.
     std::uint64_t engineEventCount = 0; ///< Total engine events drained since launch.
@@ -134,6 +179,11 @@ private:
     std::atomic<int> lastScanFailedCount { 0 };  ///< Files that failed to load in the last pass.
     juce::CriticalSection scanNameLock;          ///< Guards currentScanName across threads (non-audio).
     juce::String currentScanName;                ///< Plugin file currently being scanned.
+
+    // Message-thread synth-slot coordinator (owns the async load + swap state
+    // machine). Declared BEFORE the vblank so it is fully constructed before the
+    // 60 fps tick (which calls synthSlot.poll()) can fire, and destroyed AFTER it.
+    SynthSlot synthSlot;
 
     // 60 fps snapshot read (message thread). Declared LAST so it is destroyed
     // FIRST — the callback must never fire after the members it touches are gone.

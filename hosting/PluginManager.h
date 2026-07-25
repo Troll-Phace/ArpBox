@@ -162,6 +162,11 @@ private:
                               const ProgressCallback& onProgress,
                               const CancelCallback& shouldCancel);
 
+    // MESSAGE-THREAD ONLY. One-time, copy-only migration of persisted files from the
+    // pre-#13 location (~/Library/ARPBOX) to the corrected one, preserving the
+    // originals. Called from the constructor; no-op for a custom (test) settings dir.
+    void migrateLegacySettingsIfNeeded () const;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginManager)
 };
 

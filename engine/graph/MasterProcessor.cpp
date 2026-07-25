@@ -60,7 +60,13 @@ void MasterProcessor::applyCommand (const EngineCommand& command) noexcept
     switch (command.type)
     {
         case EngineCommandType::setMasterGainDb:
-            outputGain.setGainDecibels (command.value.f); // smoothed to target
+            // Sanitize the target gain (issue #3 residual). A non-finite dB target
+            // makes dsp::Gain emit NaN AFTER the input scrub and BEFORE the limiter,
+            // re-poisoning the limiter's ballistics into permanent silence. Drop a
+            // non-finite value (keep the current gain); otherwise clamp to a sane
+            // master range before applying. isfinite + jlimit only — no alloc/lock.
+            if (std::isfinite (command.value.f))
+                outputGain.setGainDecibels (juce::jlimit (-100.0f, 24.0f, command.value.f)); // smoothed to target
             break;
 
         case EngineCommandType::setLimiterEnabled:
@@ -73,7 +79,9 @@ void MasterProcessor::applyCommand (const EngineCommand& command) noexcept
             break;
 
         case EngineCommandType::setTestToneFrequency:
-            if (toneControl != nullptr)
+            // Drop a non-finite frequency (issue #3 residual): the tone node's own
+            // [20, 20000] clamp is jlimit-based, and jlimit(NaN) is ill-defined.
+            if (toneControl != nullptr && std::isfinite (command.value.f))
                 toneControl->frequencyHz.store (command.value.f, std::memory_order_relaxed);
             break;
 
@@ -92,8 +100,45 @@ void MasterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     if (commandQueue != nullptr)
         commandQueue->drain ([this] (const EngineCommand& c) noexcept { applyCommand (c); });
 
+    // 1b. Graph-latency reporting. Poll the source (the root graph) and emit a
+    //     latencyChanged event ONLY on a change. The audio thread is the sole
+    //     producer of EngineEventQueue (EngineEvent.h), so this must happen here,
+    //     not on the message thread that edits topology. Reading getLatencySamples()
+    //     is a lock-free int read; a one-block-stale value is fine for a UI badge.
+    if (latencySource != nullptr && eventQueue != nullptr)
+    {
+        const std::int32_t latency = latencySource->getLatencySamples ();
+        if (latency != lastReportedLatency)
+        {
+            lastReportedLatency = latency;
+            EngineEvent ev;
+            ev.type = EngineEventType::latencyChanged;
+            ev.a = static_cast<std::uint32_t> (juce::jmax (0, latency));
+            eventQueue->push (ev);
+        }
+    }
+
     const int numChannels = buffer.getNumChannels ();
     const int numSamples = buffer.getNumSamples ();
+
+    // RT-SAFE:
+    // 1c. INPUT NaN/Inf scrub (issue #3, defense-in-depth). A single non-finite
+    //     input sample poisons dsp::Limiter's internal ballistics (the envelope
+    //     goes NaN) and — because the graph-boundary scrub below runs AFTER the
+    //     limiter — the master would stay PERMANENTLY silent until the next
+    //     prepareToPlay. Scrub here, before gain/limiter, so the limiter never sees
+    //     a non-finite sample and recovers on the next clean block. The post-limiter
+    //     scrub (step 4) stays as the output guard. Per-sample std::isfinite; no
+    //     alloc, no lock. Branch-free select.
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        float* const data = buffer.getWritePointer (ch);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float v = data[i];
+            data[i] = std::isfinite (v) ? v : 0.0f;
+        }
+    }
 
     // 2. Output gain + 3. safety limiter, in place over the whole block.
     if (numChannels > 0 && numSamples > 0)
@@ -164,6 +209,9 @@ void MasterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         snap.rmsL = rms[0];
         snap.rmsR = rms[1];
         snap.deviceStatus = deviceStatus.load (std::memory_order_relaxed);
+        snap.voiceCount = voiceCountSource != nullptr
+                              ? voiceCountSource->load (std::memory_order_relaxed)
+                              : static_cast<std::uint16_t> (0);
         snap.blockCounter = blockCounter;
 
         snapshotBuffer->beginWrite () = snap;

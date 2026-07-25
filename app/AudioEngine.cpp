@@ -39,11 +39,21 @@ AudioEngine::AudioEngine ()
     deviceManager.addAudioCallback (this);
     deviceManager.addChangeListener (this);
 
+    // 3b. Hardware MIDI input (§9). Enable every available input device and
+    //     register a global callback (empty identifier = all enabled inputs). Each
+    //     message is forwarded into the graph's shared collector on the MIDI thread;
+    //     the MIDI-In node drains it on the audio thread. Its sample rate is set by
+    //     the node's prepareToPlay (driven above by addAudioCallback(&player) →
+    //     audioDeviceAboutToStart), so we do NOT reset the collector here.
+    for (const auto& input : MidiInput::getAvailableDevices ())
+        deviceManager.setMidiInputDeviceEnabled (input.identifier, true);
+    deviceManager.addMidiInputDeviceCallback ({}, this);
+
     // 4. Reflect the opened device into the snapshot + cached readout.
     refreshDeviceDescription ();
-    graph.setDeviceStatus (deviceManager.getCurrentAudioDevice () != nullptr
-                               ? engine::deviceStatusOk
-                               : engine::deviceStatusDead);
+    setDeviceStatus (deviceManager.getCurrentAudioDevice () != nullptr
+                         ? engine::deviceStatusOk
+                         : engine::deviceStatusDead);
 }
 
 // MESSAGE-THREAD ONLY.
@@ -60,8 +70,10 @@ AudioEngine::~AudioEngine ()
     // Persist the current selection while the device is still open.
     saveDeviceState ();
 
-    // (b) Detach observers/callbacks. Remove the monitor and the player so no
-    //     device thread can touch either after this point.
+    // (b) Detach observers/callbacks. Remove the MIDI callback first so no MIDI
+    //     thread can push into the graph's collector after this; then the monitor
+    //     and the player so no device thread can touch either after this point.
+    deviceManager.removeMidiInputDeviceCallback ({}, this);
     deviceManager.removeChangeListener (this);
     deviceManager.removeAudioCallback (this);
     deviceManager.removeAudioCallback (&player);
@@ -109,12 +121,39 @@ void AudioEngine::initialiseDevice ()
 // MESSAGE-THREAD ONLY.
 File AudioEngine::getSettingsFile () const
 {
+    // ARCHITECTURE §6.1: persist under ~/Library/Application Support/ARPBOX (issue
+    // #13). On macOS `userApplicationDataDirectory` is ~/Library, so we must descend
+    // into "Application Support/ARPBOX" explicitly. PluginManager uses the IDENTICAL
+    // path so both land in the same directory.
     auto dir = File::getSpecialLocation (File::userApplicationDataDirectory)
+                   .getChildFile ("Application Support")
                    .getChildFile ("ARPBOX");
     if (! dir.isDirectory ())
         dir.createDirectory ();
 
-    return dir.getChildFile ("audio-device-settings.xml");
+    auto settingsFile = dir.getChildFile ("audio-device-settings.xml");
+
+    // One-time forward migration (issue #13): earlier builds wrote to the wrong
+    // ~/Library/ARPBOX. If the new-path file is absent but the legacy one exists,
+    // COPY it forward. Leave the legacy file in place as a safety fallback — do NOT
+    // move or delete it. Once the new file exists this is a no-op.
+    if (! settingsFile.existsAsFile ())
+    {
+        auto legacyFile = File::getSpecialLocation (File::userApplicationDataDirectory)
+                              .getChildFile ("ARPBOX")
+                              .getChildFile ("audio-device-settings.xml");
+        if (legacyFile.existsAsFile ())
+        {
+            // Check the copy result (issue #13 robustness): a partial copy can leave
+            // a truncated destination that then blocks future retries (existsAsFile
+            // becomes true). On failure, delete the partial file so the next launch
+            // retries the migration cleanly.
+            if (! legacyFile.copyFileTo (settingsFile))
+                settingsFile.deleteFile ();
+        }
+    }
+
+    return settingsFile;
 }
 
 // MESSAGE-THREAD ONLY.
@@ -137,6 +176,13 @@ void AudioEngine::refreshDeviceDescription ()
     {
         deviceDescription = "No audio device";
     }
+}
+
+// MESSAGE-THREAD ONLY.
+void AudioEngine::setDeviceStatus (engine::DeviceStatus status) noexcept
+{
+    currentDeviceStatus = status;
+    graph.setDeviceStatus (status);
 }
 
 // ── Device-death detection (audio/device thread) ─────────────────────────────
@@ -208,10 +254,12 @@ void AudioEngine::handleAsyncUpdate ()
         return;
 
     // Bounded-retry state (finding #4) lives in message-thread-only members
-    // (fallbackAttemptsInWindow / fallbackWindowStartMs). handleAsyncUpdate runs
-    // only on the message thread (AsyncUpdater) and never concurrently with itself
-    // (fallbackInProgress guards re-entrancy), so this cross-call state needs no
-    // synchronisation. `fallbackWindowStartMs` == 0 means "no window open yet".
+    // (fallbackAttemptsInWindow / fallbackWindowActive / fallbackWindowStartMs).
+    // handleAsyncUpdate runs only on the message thread (AsyncUpdater) and never
+    // concurrently with itself (fallbackInProgress guards re-entrancy), so this
+    // cross-call state needs no synchronisation. `fallbackWindowActive` is an
+    // explicit "window open" flag (issue #11) — NOT a `fallbackWindowStartMs == 0`
+    // sentinel, which could collide with a real zero millisecond counter.
     auto* current = deviceManager.getCurrentAudioDevice ();
     const bool deviceGone = simulated || current == nullptr || ! current->isOpen ();
 
@@ -219,11 +267,13 @@ void AudioEngine::handleAsyncUpdate ()
     {
         const auto now = juce::Time::getMillisecondCounter ();
 
-        // Open a fresh retry window on the very first attempt, or once the prior
-        // window has fully elapsed (the device stayed healthy long enough that any
-        // earlier churn is considered over — this rolling window is the reset).
-        if (fallbackWindowStartMs == 0 || now - fallbackWindowStartMs >= kFallbackWindowMs)
+        // Open a fresh retry window on the very first attempt (window not active),
+        // or once the prior window has fully elapsed (the device stayed healthy long
+        // enough that any earlier churn is considered over — this rolling window is
+        // the reset).
+        if (! fallbackWindowActive || now - fallbackWindowStartMs >= kFallbackWindowMs)
         {
+            fallbackWindowActive = true;
             fallbackWindowStartMs = now;
             fallbackAttemptsInWindow = 0;
         }
@@ -234,7 +284,7 @@ void AudioEngine::handleAsyncUpdate ()
             // (no more initialiseWithDefaultDevices) and declare the engine dead
             // until the window elapses and a genuinely new trigger arrives after
             // the cool-down.
-            graph.setDeviceStatus (engine::deviceStatusDead);
+            setDeviceStatus (engine::deviceStatusDead);
         }
         else
         {
@@ -262,9 +312,20 @@ void AudioEngine::performFallback ()
     auto* device = deviceManager.getCurrentAudioDevice ();
 
     if (error.isEmpty () && device != nullptr && device->isOpen ())
-        graph.setDeviceStatus (engine::deviceStatusFellBackToDefault);
+    {
+        // Remember which device the fallback landed on (issue #10). The
+        // initialiseWithDefaultDevices call above broadcasts a device change, so
+        // changeListenerCallback will fire for THIS same device — it must NOT treat
+        // that as a healthy re-selection and clear the banner. It compares the newly
+        // active device name against this stored one and only upgrades when a
+        // DIFFERENT healthy device is chosen.
+        fallbackDeviceName = device->getName ();
+        setDeviceStatus (engine::deviceStatusFellBackToDefault);
+    }
     else
-        graph.setDeviceStatus (engine::deviceStatusDead);
+    {
+        setDeviceStatus (engine::deviceStatusDead);
+    }
 
     refreshDeviceDescription ();
     saveDeviceState ();
@@ -276,5 +337,28 @@ void AudioEngine::changeListenerCallback (juce::ChangeBroadcaster*)
 {
     refreshDeviceDescription ();
     saveDeviceState ();
+
+    // Clear a stale FellBackToDefault banner when the user re-selects a genuinely
+    // healthy device (issue #10). Guard against the fallback's OWN change broadcast:
+    // upgrade to Ok only if the now-open device is DIFFERENT from the one the
+    // fallback selected (a real re-selection), never a downgrade from Dead, and only
+    // FROM FellBackToDefault. Re-picking the exact fallback device is the rare case
+    // left as-is (the user is on the fallback device anyway).
+    if (currentDeviceStatus == engine::deviceStatusFellBackToDefault)
+    {
+        if (auto* device = deviceManager.getCurrentAudioDevice ();
+            device != nullptr && device->isOpen () && device->getName () != fallbackDeviceName)
+        {
+            setDeviceStatus (engine::deviceStatusOk);
+        }
+    }
+}
+
+// MIDI-INPUT THREAD. Forward the message to the graph's shared collector; the
+// MIDI-In node drains it on the audio thread. addMessageToQueue is internally
+// synchronized (the collector's own lock), so this cross-thread hand-off is safe.
+void AudioEngine::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& message)
+{
+    graph.midiInputCollector ().addMessageToQueue (message);
 }
 } // namespace arpbox::app

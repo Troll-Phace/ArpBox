@@ -63,12 +63,25 @@ add_executable(arpbox_tests
     fakes/HostingLabSupport.h
     hosting_scan.cpp
     hosting_instantiate.cpp
+    # Phase 4.4 synth-hosting integration + RT tests (HostedPluginNode wrapper, the
+    # MIDI-In node, and the fake-synth end-to-end / swap-under-playback graph paths).
+    fakes/HostedSynthGraphSupport.h
+    hosted_node_unit.cpp
+    midi_input_node.cpp
+    hosting_synth_e2e.cpp
+    hosting_swap_stress.cpp
     # Issue #19 in-process-scan crash-recovery stopgap: dead-man's-pedal blacklist,
     # blacklist persistence round-trip, and incremental-resume skip (headless).
     hosting_crash_recovery.cpp
     # Regression guard: the REAL production format registration helper actually
     # registers VST3 + AudioUnit (guards the Phase 3 "0 formats" host-flag bug).
-    hosting_formats.cpp)
+    hosting_formats.cpp
+    # Issue #22/#24: SynthSlot message-thread coordinator unit tests. The coordinator
+    # depends only on the GUI-free app/ISynthEngine.h seam (NOT AudioEngine), so
+    # app/SynthSlot.cpp compiles into this GUI-free target linking arpbox_hosting only
+    # (no juce_audio_utils / juce_audio_devices). See the app/ include root added below.
+    ${CMAKE_SOURCE_DIR}/app/SynthSlot.cpp
+    synthslot_coordinator.cpp)
 
 target_compile_features(arpbox_tests PRIVATE cxx_std_20)
 
@@ -83,8 +96,12 @@ target_compile_definitions(arpbox_tests PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)
 
 # tests/ as an include root so tests reach support/ headers as
 # "support/AllocationSentinel.h" (engine headers come via arpbox_engine's exported
-# "engine/..." include root).
-target_include_directories(arpbox_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# "engine/..." include root). app/ is added so the SynthSlot coordinator sources +
+# tests resolve "SynthSlot.h" / "ISynthEngine.h" (issue #22 testability seam); the
+# "hosting/..." include root arrives via arpbox_hosting's PUBLIC export.
+target_include_directories(arpbox_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/app)
 
 target_link_libraries(arpbox_tests
     PRIVATE

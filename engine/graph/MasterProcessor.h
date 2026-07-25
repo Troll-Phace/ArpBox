@@ -3,6 +3,7 @@
 #include "../EngineGuiGuard.h"
 #include "DeviceStatus.h"
 #include "EngineCommand.h"
+#include "EngineEvent.h"
 #include "EngineSnapshotBuffer.h"
 #include "ToneControl.h"
 
@@ -17,8 +18,9 @@ namespace arpbox::engine
 /** Master-section graph node: the last processor before the audio-output node
     (ARCHITECTURE §7). Signal chain, in order, per `processBlock`:
 
-        drain EngineCommandQueue → output gain → safety limiter (default ON)
-        → NaN/Inf scrub (graph boundary) → meter tap → publish EngineSnapshot
+        drain EngineCommandQueue → INPUT NaN/Inf scrub → output gain
+        → safety limiter (default ON) → OUTPUT NaN/Inf scrub (graph boundary)
+        → meter tap → publish EngineSnapshot
 
     COMMAND DRAIN (Phase-2 arrangement — TEMPORARY): the master is the SINGLE
     consumer of the shared `EngineCommandQueue`. It drains at the top of its block
@@ -28,9 +30,13 @@ namespace arpbox::engine
     head-of-engine drain migrates to the transport/arp head node in Phase 5; the
     master then owns only gain/limiter/metering.
 
-    NaN/Inf SCRUB: this node is THE scrub point for the whole graph boundary — a
+    NaN/Inf SCRUB (defense-in-depth, issue #3): TWO scrubs. The INPUT scrub (before
+    gain/limiter) protects `dsp::Limiter` — one non-finite input sample poisons its
+    ballistics and, with only a post-limiter scrub, would silence the master
+    permanently until the next prepareToPlay; scrubbing the input lets the limiter
+    recover on the next clean block. The OUTPUT scrub is THE graph-boundary guard — a
     non-finite sample reaching CoreAudio can wedge the driver, so every sample is
-    forced finite here, once, after gain+limiter and before metering/output.
+    forced finite once more after gain+limiter, before metering/output.
 
     All sample-rate-dependent DSP state (`dsp::Gain`, `dsp::Limiter`) is prepared
     ONLY in `prepareToPlay`; `processBlock` never allocates, locks, or re-prepares. */
@@ -52,6 +58,25 @@ public:
     void setSharedState (EngineCommandQueue* commands,
                          EngineSnapshotBuffer* snapshots,
                          ToneControl* tone) noexcept;
+
+    // MESSAGE-THREAD ONLY: wiring. Injects the engine→UI event queue this node
+    // produces onto (the AUDIO thread is that queue's SOLE producer — see
+    // EngineEvent.h). Call once, before the node joins the graph.
+    /** Wires the discrete event queue used to emit `latencyChanged` from the audio
+        thread. Non-owning; must outlive this node. */
+    void setEventQueue (EngineEventQueue* events) noexcept { eventQueue = events; }
+
+    // MESSAGE-THREAD ONLY: wiring. Injects the processor whose `getLatencySamples()`
+    // is polled each block to detect graph-latency changes (normally the root graph
+    // itself, so total serial-chain latency is reported). Non-owning; must outlive
+    // this node. Reading an int on the audio thread is lock-free and benign.
+    /** Sets the latency source polled on the audio thread for `latencyChanged`. */
+    void setLatencySource (const juce::AudioProcessor* source) noexcept { latencySource = source; }
+
+    // MESSAGE-THREAD ONLY: wiring. Injects the atomic the MIDI-In node publishes its
+    // live voice count into; copied into every `EngineSnapshot`. Non-owning.
+    /** Sets the voice-count source surfaced through `EngineSnapshot.voiceCount`. */
+    void setVoiceCountSource (const std::atomic<std::uint16_t>* source) noexcept { voiceCountSource = source; }
 
     // MESSAGE-THREAD ONLY: called by the device/app layer (Phase 2.1) to report
     // audio-device health. The value is copied into every published snapshot.
@@ -125,6 +150,16 @@ private:
     EngineCommandQueue* commandQueue = nullptr;   ///< Drained by this node (SPSC consumer).
     EngineSnapshotBuffer* snapshotBuffer = nullptr;///< Written by this node each block.
     ToneControl* toneControl = nullptr;            ///< Published to on tone commands.
+    EngineEventQueue* eventQueue = nullptr;        ///< Produced onto by this node (latencyChanged).
+
+    // Latency reporting: poll the source's latency on the audio thread and emit a
+    // latencyChanged event only when it changes. `-1` forces one report on the
+    // first block so the UI always gets an initial reading.
+    const juce::AudioProcessor* latencySource = nullptr; ///< Usually the root graph.
+    std::int32_t lastReportedLatency = -1;               ///< Audio-thread private; last emitted value.
+
+    // Voice-count source (MIDI-In node publishes; this node snapshots it).
+    const std::atomic<std::uint16_t>* voiceCountSource = nullptr;
 
     // Master DSP — prepared in prepareToPlay, read/processed on the audio thread.
     juce::dsp::Gain<float> outputGain;   ///< Smoothed output gain (dB target).

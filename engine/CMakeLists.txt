@@ -25,6 +25,7 @@ add_library(arpbox_engine STATIC
     graph/EngineSnapshot.h
     graph/EngineSnapshotBuffer.h
     graph/EngineEvent.h
+    graph/NoteEvent.h
     graph/RetirementQueue.h
     # Phase 2.2 master section, test-tone source, and root graph assembly
     # (ARCHITECTURE §3.3, §7). No GUI deps — juce_dsp + headless audio_processors.
@@ -34,6 +35,11 @@ add_library(arpbox_engine STATIC
     graph/TestToneProcessor.cpp
     graph/MasterProcessor.h
     graph/MasterProcessor.cpp
+    # Phase 4 MIDI-in path (ARCHITECTURE §3.3): QWERTY/pad note channel + the
+    # MIDI-only merge/filter node feeding the synth slot.
+    graph/MidiInputControl.h
+    graph/MidiInputProcessor.h
+    graph/MidiInputProcessor.cpp
     graph/EngineGraph.h
     graph/EngineGraph.cpp
     EngineGuiGuard.h)
