@@ -172,6 +172,12 @@ private:
     int lastSavedTypeCount = 0;        ///< Known-type count at the last periodic save.
     std::uint32_t lastSaveTimeMs = 0;  ///< Time::getMillisecondCounter() at the last periodic save.
 
+    // True iff the most recent PluginManager::save() attempt failed (issue #17).
+    // PluginManager logs the failure durably; this drives the VISIBLE marker in the
+    // scan status line, so a user whose list is not persisting finds out before losing
+    // the scan. Message thread only.
+    bool lastPersistFailed = false;
+
     // ── Background plugin scan (DEV-ONLY) ────────────────────────────────────
     // scanAll() BLOCKS, so it runs on this worker thread, NEVER the message thread.
     // Cooperative-cancel via threadShouldExit() (the scan's cancel predicate);
@@ -188,8 +194,15 @@ private:
     ScanThread scanThread { *this };
 
     // Cross-thread scan state: the worker WRITES, the vblank (message thread) READS.
-    std::atomic<bool> scanRunning { false };     ///< Worker is inside scanAll().
-    std::atomic<bool> scanJustFinished { false }; ///< Worker finished; message thread must save().
+    //
+    // ORDERING (issue #15): both flags are RELEASE-stored by the worker and
+    // ACQUIRE-loaded by the vblank. That pairing is what publishes the worker's
+    // KnownPluginList mutations to the message thread — without it, the vblank could
+    // observe "finished"/"not running" with no happens-before on the list the worker
+    // built, then persist or display it. The remaining fields are relaxed on purpose:
+    // they are only ever read after one of the two flag acquires, which orders them.
+    std::atomic<bool> scanRunning { false };     ///< Worker is inside scanAll(). Release/acquire.
+    std::atomic<bool> scanJustFinished { false }; ///< Worker finished; message thread must save(). Release/acquire.
     std::atomic<float> scanProgress { 0.0f };    ///< [0,1] progress of the current pass.
     std::atomic<int> lastScannedTypeCount { 0 }; ///< Types in the list after the last pass.
     std::atomic<int> lastScanFailedCount { 0 };  ///< Files that failed to load in the last pass.

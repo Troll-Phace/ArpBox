@@ -164,7 +164,7 @@ TEST_CASE ("hosting/crash-recovery: save/restore round-trips the blacklist along
         manager.getKnownPluginList ().addToBlacklist (quarantined);
         REQUIRE (manager.getKnownPluginList ().getBlacklistedFiles ().contains (quarantined));
 
-        manager.save ();
+        REQUIRE (manager.save ().wasOk ());
         REQUIRE (manager.getPluginListFile ().existsAsFile ());
     }
 
@@ -209,7 +209,7 @@ TEST_CASE ("hosting/crash-recovery: an incremental resume skips already-known pl
         const auto result = manager.scanFormat (fakeFormat, /*rescanExisting*/ true);
         REQUIRE (result.numTypesInList == numDiscoverableInCorpus ());
 
-        manager.save ();
+        REQUIRE (manager.save ().wasOk ());
         REQUIRE (manager.getPluginListFile ().existsAsFile ());
     }
 

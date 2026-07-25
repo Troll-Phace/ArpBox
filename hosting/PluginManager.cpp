@@ -152,10 +152,44 @@ void PluginManager::cancelScan () noexcept
 // ── Persistence ──────────────────────────────────────────────────────────────
 
 // MESSAGE-THREAD ONLY. Mirrors AudioEngine::saveDeviceState.
-void PluginManager::save () const
+Result PluginManager::save () const
 {
-    if (auto xml = knownList.createXml ()) // null only if the list is empty-and-untouched
-        xml->writeTo (getPluginListFile ());
+    // Logs AND returns the failure. The log is the DURABLE half of issue #17 and lives
+    // here, in the permanent class, rather than in each caller: it cannot be forgotten
+    // by a future caller, and it survives DebugPanel's removal at Phase 15+.
+    // Logger::writeToLog is used deliberately instead of DBG — DBG expands to NOTHING
+    // under NDEBUG, so a DBG-only handler is silent in exactly the RelWithDebInfo /
+    // Release builds we ship, which is the very bug this issue is about. Message thread
+    // only, so logging is permitted (the no-logging rule covers the audio thread).
+    const auto fail = [] (const String& message)
+    {
+        Logger::writeToLog ("ARPBOX: plugin-list save FAILED — " + message);
+        return Result::fail (message);
+    };
+
+    const auto file = getPluginListFile ();
+
+    // JUCE 8's createXml() unconditionally builds a <KNOWNPLUGINS> element — an empty
+    // list yields an EMPTY element, never null (the old "null only if the list is
+    // empty-and-untouched" comment was simply wrong). Its return is only
+    // std::unique_ptr, not a documented never-null contract, so keep a defensive
+    // branch: if it ever did return null we would have nothing to persist, and that is
+    // a failure to save, not a silent no-op success.
+    const auto xml = knownList.createXml ();
+
+    if (xml == nullptr)
+    {
+        jassertfalse;
+        return fail ("Could not build the known-plugin list XML.");
+    }
+
+    // writeTo() is atomic (temp file → fsync → rename), so a failure here leaves any
+    // existing plugin-list.xml untouched rather than truncated. The failure itself is
+    // what must not be silent (issue #17) — losing the write means losing the scan.
+    if (! xml->writeTo (file))
+        return fail ("Could not write the known-plugin list to " + file.getFullPathName ());
+
+    return Result::ok ();
 }
 
 // MESSAGE-THREAD ONLY. Mirrors AudioEngine::initialiseDevice restore path.

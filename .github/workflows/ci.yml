@@ -116,29 +116,24 @@ jobs:
       - name: Install tools
         run: brew install ninja llvm
 
-      - name: Configure single-arch compile DB
-        # clang-tidy chokes on the universal build's dual -arch flags, so build
-        # the compile_commands.json for a SINGLE arch (arm64). Homebrew clang
-        # also needs an explicit -isysroot (passed at lint time). (task 1.1)
-        run: |
-          cmake -B build-tidy -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_OSX_ARCHITECTURES="arm64" \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-
-      - name: Run clang-tidy on ARPBOX sources
-        run: |
-          TIDY="$(brew --prefix llvm)/bin/clang-tidy"
-          SYSROOT="$(xcrun --show-sdk-path)"
-          "$TIDY" --version
-          # Derive the source list from git so Phase 2+ files are linted
-          # automatically (no hardcoded file list to keep in sync).
-          for f in $(git ls-files 'app/*.cpp' 'engine/*.cpp' 'hosting/*.cpp' 'ui/*.cpp' 'scanner-helper/*.cpp'); do
-            echo "== clang-tidy $f =="
-            # No `|| true`: keep WarningsAsErrors meaningful. The job-level
-            # continue-on-error keeps this non-blocking for now.
-            "$TIDY" -p build-tidy "$f" --extra-arg=-isysroot --extra-arg="$SYSROOT"
-          done
+      - name: Run clang-tidy (shared lint driver)
+        # ONE mechanism, shared with the local /run-lint skill (issue #31).
+        # .claude/skills/run-lint/lint.sh configures the `tidy` CMake preset
+        # (single-arch compile DB, because clang-tidy rejects the universal
+        # tree's dual -arch flags, plus CMAKE_OSX_SYSROOT=macosx so -isysroot is
+        # baked into the database instead of hand-passed) and lints the same
+        # git-tracked ARPBOX sources a developer sees locally.
+        #
+        # Keep this a one-liner. Anything that needs changing about HOW linting
+        # runs belongs in the script, so local and CI cannot drift apart again —
+        # that drift is exactly why a single-arch DB had to be improvised by hand
+        # during Phase 4 and again during Phase 5.
+        #
+        # No `|| true`: the script exits non-zero on findings, which keeps
+        # .clang-tidy's `WarningsAsErrors: '*'` meaningful. The job-level
+        # continue-on-error keeps this non-blocking for now.
+        # macos-14 runners are 3-core.
+        run: bash .claude/skills/run-lint/lint.sh tidy -j 3
 
   notarize:
     name: Notarize (release refs — STUB)

@@ -109,13 +109,16 @@ public:
 
     // ── Transport (Phase 5.1) ────────────────────────────────────────────────
 
-    // MESSAGE-THREAD ONLY (observation): the transport is AUDIO-THREAD-OWNED state.
-    // Its scalars are non-atomic by design (see Transport.h), so a message-thread
-    // read can tear against a concurrent `beginBlock`. This accessor exists for
-    // HEADLESS TESTS and engine-internal wiring, which drive the graph themselves;
-    // the UI must read transport state from `EngineSnapshot` instead (§10.1).
+    // MESSAGE-THREAD ONLY (observation): the transport is AUDIO-THREAD-OWNED state,
+    // mutated ONLY by `beginBlock`/`applyCommand` on the audio thread. Its scalars are
+    // non-atomic by design (see Transport.h), so a message-thread read can tear against
+    // a concurrent `beginBlock`. Returned `const` (issue #39) so no API on the graph can
+    // mutate the clock off the audio thread — every write arrives as an `EngineCommand`
+    // (§3.4). This accessor exists for HEADLESS TESTS and engine-internal wiring, which
+    // drive the graph themselves; the UI must read transport state from `EngineSnapshot`
+    // instead (§10.1).
     /** The transport clock. Not for UI consumption — use `snapshots()`. */
-    Transport& getTransport () noexcept { return transport; }
+    const Transport& getTransport () const noexcept { return transport; }
 
     // MESSAGE-THREAD ONLY (observation).
     /** The custom playhead installed on the graph; exposed for tests. */

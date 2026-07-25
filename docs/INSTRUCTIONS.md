@@ -393,10 +393,16 @@ Auto-generated parameter view from `AudioProcessorParameter` enumeration (slider
 
 Hosting-lab: open/close storm, editor-open during plugin swap/removal, generic editor against fakes with pathological parameter counts.
 
+**Leak detection mechanism — ASan does NOT provide this on macOS.** LeakSanitizer is unsupported on Darwin: `ASAN_OPTIONS=detect_leaks=1` is rejected and aborts Catch2's test-discovery step, so the `asan` preset finds memory *errors* (use-after-free / out-of-bounds) and never leaks. Use instead:
+
+- **The gate** (enforcing): `leaks --atExit -- ./build/tests/arpbox_tests "<storm test>"`, wired as its own CTest test in the hosting-lab suite. `leaks` exits non-zero when anything leaked, so the gate fails on its own with no human reading output — verified locally (0 leaks ⇒ exit 0; one deliberate `malloc` leak ⇒ exit 1). Works in any build config; the `debug` preset only adds attribution. `leaks` needs task-port access to the child, so confirm it functions on the CI runner when wiring it — if it cannot run there, the gate is a required local/pre-release step and the phase is not met on CI evidence alone.
+- **Attribution** (diagnostic only, never the gate): JUCE's `LeakedObjectDetector` via `JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR` names the leaking class. It requires the `debug` preset — `JUCE_CHECK_MEMORY_LEAKS` is defined only under `JUCE_DEBUG`, so in RelWithDebInfo every leak detector in the codebase compiles to nothing — and even then it only *prints*, because `jassertfalse` is a no-op unless a debugger is attached. A leaking test run under it still exits 0. Do not treat it as a pass/fail signal.
+- **Manual / soak passes**: Instruments' Leaks instrument (see 21.3).
+
 ### Success Criteria
 - [ ] Real plugin editors open, resize, remember position, survive removal
 - [ ] Generic editor works for every fake and real plugin tested
-- [ ] No leaks in open/close storm (ASan clean)
+- [ ] Open/close storm is leak-free under the `leaks --atExit` gate above — and that gate is **validated fails-without/passes-with**: land the test alongside a temporary deliberate editor-window leak, record the non-zero exit, then remove the leak and record green. A leak check that has never been seen to fail does not count as met
 
 ---
 
@@ -813,12 +819,13 @@ Profile (Instruments) and fix engine/graph hotspots surfaced by 21.1; coordinate
 #### 21.3 Sanitizer soak
 **Delegate to**: `test-engineer`
 
-Extended TSan/ASan soak runs of the full suites + a scripted app session; zero findings tolerated (or logged critical).
+Extended TSan/ASan soak runs of the full suites + a scripted app session; zero findings tolerated (or logged critical). **Leaks are a separate mechanism**: TSan covers races and ASan on macOS covers memory *errors* only — LeakSanitizer does not exist on Darwin (see Phase 10.3). Leak coverage for this phase is `leaks --atExit` over the suites plus an Instruments Leaks pass across the 24-hour session; do not report "ASan clean" as evidence of leak-freedom.
 
 ### Success Criteria
 - [ ] All §11 budgets green in CI
-- [ ] Zero TSan/ASan findings across soak runs
-- [ ] 24-hour playback soak: no leaks, no drift, no stuck notes
+- [ ] Zero TSan findings (races) and zero ASan findings (memory errors) across soak runs
+- [ ] Zero leaks across the suites under `leaks --atExit`, using the same validated gate as Phase 10.3
+- [ ] 24-hour playback soak: no drift, no stuck notes, and a flat allocation trend with no leaks reported by Instruments' Leaks instrument
 
 ---
 
