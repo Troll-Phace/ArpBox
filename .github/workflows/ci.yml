@@ -158,6 +158,53 @@ jobs:
           export ARPBOX_LLVM_BIN="$(brew --prefix llvm@22)/bin"
           bash .claude/skills/run-lint/lint.sh format
 
+  warnings:
+    name: compiler warnings (blocking)
+    runs-on: macos-14
+    # BLOCKING, like clang-format and unlike clang-tidy. Issue #79: three live
+    # `-Wswitch-enum` warnings sat in the tree while BOTH existing lint jobs exited
+    # 0, because clang-tidy runs its own check set and never sees compiler
+    # diagnostics and clang-format only sees text. So a warning class the codebase
+    # deliberately depends on (engine/sequencer/StepLogic.cpp documents that its
+    # 39-condition ladder avoids a switch *because* -Wswitch-enum is on) was
+    # enforced by nothing.
+    #
+    # Why blocking rather than advisory: a compiler warning under
+    # juce_recommended_warning_flags is objective and machine-decidable, like format
+    # drift and unlike a clang-tidy finding on scaffold code — and the entire point
+    # of #79 is that a gate whose silence is indistinguishable from its approval is
+    # worthless. Non-blocking would recreate that. The gate refuses to report a
+    # verdict it cannot justify (see run_warnings' four guards in lint.sh), so a
+    # green here means something.
+    #
+    # If a future toolchain bump makes a runner emit a warning the tree cannot
+    # reasonably fix, fix or scope the warning — do NOT add continue-on-error. That
+    # is how #79 happened.
+    steps:
+      - name: Checkout (with JUCE submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Compiler-warning gate (shared lint driver)
+        # ONE mechanism, shared with the local /run-lint skill (issue #31). The gate
+        # reuses the `tidy` CMake preset's single-arch tree — single-arch so each
+        # diagnostic appears once rather than twice as in the universal build — and
+        # deletes its own object files before building so it can never report a
+        # no-op build as clean. macos-14 runners are 3-core.
+        run: bash .claude/skills/run-lint/lint.sh warnings -j 3
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: warnings-build-log
+          path: build-tidy/arpbox-warnings.log
+          if-no-files-found: warn
+
   lint:
     name: clang-tidy (single-arch DB, non-blocking)
     runs-on: macos-14

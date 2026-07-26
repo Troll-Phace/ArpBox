@@ -43,8 +43,8 @@ enum class EngineCommandType : std::uint8_t
         `FILL`/`!FILL` trig conditions and is a momentary live-performance flag
         that changes on both press AND release, so carrying it on
         `PatternSnapshot` would rebuild and republish the whole document twice
-        per pad tap. Master and Transport ignore it via their `default:` arms
-        (ICommandSink.h fan-out contract). */
+        per pad tap. Master and Transport ignore it via the grouped no-op arm
+        every sink ends with (ICommandSink.h fan-out contract). */
     setFillHeld,
     // Later phases: seed/DICE, commit/uncommit — appended as new enumerators above
     // this line.

@@ -166,13 +166,25 @@ void Transport::applyCommand (const EngineCommand& command) noexcept
             reanchor (command.value.d);
         break;
 
+    // ── NOT OURS — the fan-out no-op arm (ICommandSink.h dispatch contract) ─────
+    // Every enumerator this sink does not own is listed EXPLICITLY and there is no
+    // `default:`. Runtime behaviour is identical to the `default: break;` this
+    // replaced (a value outside the enum simply matches no arm and leaves the
+    // switch — still a no-op), but the compile-time behaviour is not: a new
+    // `EngineCommandType` matches nothing here, and clang reports it twice over —
+    // `-Wswitch-enum` (from juce_recommended_warning_flags) AND `-Wswitch` (inside
+    // -Wall) — which `lint.sh warnings` turns into a build failure (#70, #79). The
+    // author of the new command then has to decide, per sink, whether Transport
+    // cares. That decision being forced is the whole point; a `default:` arm makes
+    // it silently for you.
     case EngineCommandType::none:
     case EngineCommandType::setMasterGainDb:
     case EngineCommandType::setLimiterEnabled:
     case EngineCommandType::setTestToneEnabled:
     case EngineCommandType::setTestToneFrequency:
-    default:
-        break; // not ours — every sink sees every command (see ICommandSink.h)
+    case EngineCommandType::queuePatternSwitch:
+    case EngineCommandType::setFillHeld:
+        break;
     }
 }
 } // namespace arpbox::engine

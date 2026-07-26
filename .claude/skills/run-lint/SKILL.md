@@ -31,7 +31,34 @@ Xcode toolchain does not ship them.
 2. Report any issues found with file paths and line numbers, grouped by check
    (flag `concurrency-*` and `bugprone-*` hits as high priority — they are
    usually RT-safety adjacent).
-3. Formatting check:
+3. Compiler-warning gate (issue #79):
+   `bash .claude/skills/run-lint/lint.sh warnings -j 8`
+   - **Separate from step 1 and equally blocking.** clang-tidy runs its own check
+     set and never sees compiler diagnostics; `lint.sh tidy` and `lint.sh format`
+     both exited 0 for a whole phase with three live `-Wswitch-enum` warnings in
+     the tree. CI's `compiler warnings (blocking)` job runs this exact command.
+   - Builds the `tidy` preset's `build-tidy/` tree (unlike step 1, which only
+     configures it) and fails on any `warning:` in `app/ engine/ hosting/
+     scanner-helper/ ui/`. Full log: `build-tidy/arpbox-warnings.log`.
+   - It refuses to report a clean result it cannot justify — six guards, each of
+     which fails the gate rather than warning. It deletes the object file of every
+     in-scope TU and asserts they all came back (so a no-op build cannot pass),
+     self-tests its diagnostic parser against a fixture, asserts
+     `-Wswitch-enum`/`-Wall` actually reach every in-scope source (rejecting a
+     `-Wno-` or a bare `-w` that would cancel them), and runs an **end-to-end
+     canary** (issue #87): a throwaway TU compiled with a real in-scope TU's own
+     flags, provoking a real `-Wswitch-enum`, asserted to survive the extractor.
+     The canary is the only guard that tests the *join* between compiler output and
+     extractor — the other five can all be green while a diagnostic-format change
+     has made the gate completely blind.
+   - If a guard trips, the gate fails loudly instead of printing "0 warnings". A
+     canary failure means the diagnostic format changed: fix the extractor's
+     pattern (it prints the new format for you), never relax the check.
+   - `tests/` is out of scope (issue **#86**): the `arpbox_tests` target carries no
+     `-W` flags at all, so claiming coverage there would be a false green. The
+     exclusion is per-target — `app/SynthSlot.cpp` builds into both targets and is
+     covered via the flagged `ARPBOX` one.
+4. Formatting check:
    `bash .claude/skills/run-lint/lint.sh format`
    - This is a **blocking gate** — CI's `clang-format (blocking)` job runs the
      exact same command, so any finding is a real failure, not background noise
@@ -43,7 +70,8 @@ Xcode toolchain does not ship them.
    - A whole-tree reformat is still user-only: `lint.sh format-fix` refuses
      unless `ARPBOX_ALLOW_FORMAT_FIX=1` is set, because a repo-wide reformat
      belongs in its own dedicated commit, never mixed into a change under review.
-4. Report summary: `{N} clang-tidy findings`, `{M} files with format drift`.
+5. Report summary: `{N} clang-tidy findings`, `{W} compiler warnings`,
+   `{M} files with format drift`.
 
 ## Troubleshooting
 
