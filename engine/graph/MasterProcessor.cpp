@@ -80,13 +80,20 @@ void MasterProcessor::applyCommand (const EngineCommand& command) noexcept
             toneControl->frequencyHz.store (command.value.f, std::memory_order_relaxed);
         break;
 
+    // ── NOT OURS — the fan-out no-op arm (ICommandSink.h dispatch contract) ─────
+    // Explicit enumeration with no `default:`, for the reason spelled out at the
+    // twin arm in Transport::applyCommand: runtime-identical to the `default:
+    // break;` it replaced, but a newly added `EngineCommandType` becomes a compile
+    // diagnostic here (`-Wswitch-enum` + `-Wswitch`) that `lint.sh warnings` fails
+    // the build on, instead of being silently swallowed (#70, #79).
     case EngineCommandType::none:
     case EngineCommandType::transportPlay:
     case EngineCommandType::transportStop:
     case EngineCommandType::transportLocate:
     case EngineCommandType::setTempoBpm:
-    default:
-        break; // not ours (Transport owns the transport commands) — ignore
+    case EngineCommandType::queuePatternSwitch:
+    case EngineCommandType::setFillHeld:
+        break;
     }
 }
 

@@ -27,8 +27,10 @@ namespace
 
         The cast is total: `buildPatternSnapshot` runs every COND value through
         `clampLaneValue`, whose range for the lane is `[0, numTrigConditions - 1]`,
-        so nothing out of enum can reach the RT path. `conditionPasses` still has a
-        `default:` arm anyway — see the note there. */
+        so nothing out of enum can reach the RT path. `acyclicConditionPasses` keeps
+        its unknown-ordinal fall-through anyway — see the note there. (There is no
+        `default:` arm to point at: that function is a comparison ladder, not a
+        switch, deliberately.) */
     TrigCondition conditionAt (const PatternData& data, std::int64_t stepIndex) noexcept
     {
         return static_cast<TrigCondition> (laneValueAt (laneOf (data, LaneId::cond), stepIndex));
@@ -42,18 +44,62 @@ namespace
         non-recursive: it is the thing that terminates the chain walk.
 
         ── WHY THIS IS NOT A `switch`, THOUGH IT OBVIOUSLY WANTS TO BE ──────────
-        `TrigCondition` has 39 enumerators and 30 of them — the whole A:B block —
-        are handled ARITHMETICALLY by `abCycleFor` rather than case by case (see the
-        note there: a 30-arm switch is 30 chances to write `3:4` where `4:4`
-        belongs). A `switch` that leaves those 30 to a `default:` arm compiles
-        cleanly but trips `-Wswitch-enum`, which this project's build has on. So the
-        named conditions are dispatched by comparison instead. Do not "tidy" this
-        back into a switch without also deciding what to do about that warning. */
+        RE-DECIDED once `lint.sh warnings` (#79) made `-Wswitch-enum` a BLOCKING
+        gate rather than a diagnostic nobody's build failed on. The conclusion did
+        not change; two of the three reasons did, so they are restated honestly.
+
+        NO LONGER A REASON: "a switch trips `-Wswitch-enum`". Adding a `default:`
+        does not silence that warning (it never did — see `ICommandSink.h`), but a
+        switch enumerating all 39 with the 30 A:B ordinals as BARE `case` labels
+        over one shared `abCycleFor` body would be perfectly gate-clean, and would
+        carry no per-case bodies, so it would not reintroduce the "30 chances to
+        write `3:4` where `4:4` belongs" hazard `abCycleFor` exists to remove
+        either. That form is legal, warning-free, and the comparison ladder is NOT
+        preferred over it on warning grounds.
+
+        WHY THE LADDER STAYS ANYWAY:
+          1. `TrigCondition` ends in a `count` sentinel, which `-Wswitch-enum`
+             counts. An exhaustive switch must therefore write an arm for a value
+             that is not a condition and has no behaviour. `ICommandSink`'s grouped
+             arm states something true ("this sink ignores these commands"); a
+             `case count:` arm states nothing.
+          2. The fan-out argument that makes the grouped arm contractual for
+             `applyCommand` does not transfer: `applyCommand` has THREE sinks that
+             each had to be visited independently (which is exactly how #70 hid),
+             whereas `TrigCondition` has exactly ONE semantic dispatch — this
+             function. Everything else that touches the enum (`abCycleFor`,
+             DebugPanel's ordinal range) is arithmetic over ordinals, not per-case
+             behaviour, and a switch there would be actively wrong.
+          3. Appending a condition already cannot compile silently: `PatternTypes.h`
+             pins `numTrigConditions == 39` and `notNei == 38` with `static_assert`s,
+             and `StepLogic.h` pins `abCycleFor (count).b == 0`. Unlike
+             `EngineCommandType` before #70, there is no quiet-append path into this
+             enum at all.
+
+        WHAT REASON 3 DID *NOT* COVER, now closed by the assert below: the enum's
+        tripwires say "the enum grew", not "this dispatcher needs an arm". An author
+        who appends a named condition and dutifully bumps those asserts would land
+        in the `cycle.b <= 0` fall-through — whose comment says degrading to `true`
+        is deliberate — and their new condition would silently fire on every step
+        while looking reviewed. That fall-through must keep meaning "ordinal from a
+        NEWER schema", never "enumerator this build has and nobody wired up", so the
+        dispatch site pins the count itself. Do not "tidy" this into a switch; do
+        not delete the assert to make an append build. */
     bool acyclicConditionPasses (const PatternData& data,
                                  std::int64_t stepIndex,
                                  StepRuntime runtime,
                                  TrigCondition cond) noexcept
     {
+        // THE LADDER'S EXHAUSTIVENESS TRIPWIRE — stands in for the `-Wswitch-enum`
+        // this comparison chain is structurally invisible to (see the note above).
+        // If this fires you added a TrigCondition: give it an arm below, or satisfy
+        // yourself that the `cycle.b <= 0` fall-through is genuinely right for it,
+        // THEN bump the count. Bumping the count first defeats the check.
+        static_assert (numTrigConditions == 39,
+                       "A new TrigCondition needs an arm in acyclicConditionPasses. Without one it "
+                       "falls through to the unknown-ordinal path and degrades to 'no condition', "
+                       "i.e. it fires on every step, silently.");
+
         if (cond == TrigCondition::none)
             return true;
 

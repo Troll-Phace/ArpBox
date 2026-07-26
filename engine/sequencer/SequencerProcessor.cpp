@@ -338,7 +338,21 @@ void SequencerProcessor::applyCommand (const EngineCommand& command) noexcept
         fillHeld = command.value.i != 0;
         break;
 
-    default:
+    // ── NOT OURS — the fan-out no-op arm (ICommandSink.h dispatch contract) ─────
+    // Explicit enumeration with no `default:`, for the reason spelled out at the
+    // twin arm in Transport::applyCommand: runtime-identical to the `default:
+    // break;` it replaced, but a newly added `EngineCommandType` becomes a compile
+    // diagnostic here (`-Wswitch-enum` + `-Wswitch`) that `lint.sh warnings` fails
+    // the build on, instead of being silently swallowed (#70, #79).
+    case EngineCommandType::none:
+    case EngineCommandType::setMasterGainDb:
+    case EngineCommandType::setLimiterEnabled:
+    case EngineCommandType::setTestToneEnabled:
+    case EngineCommandType::setTestToneFrequency:
+    case EngineCommandType::transportPlay:
+    case EngineCommandType::transportStop:
+    case EngineCommandType::transportLocate:
+    case EngineCommandType::setTempoBpm:
         break;
     }
 }

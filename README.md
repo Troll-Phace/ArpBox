@@ -121,6 +121,7 @@ linting for both developers and CI:
 
 ```
 bash .claude/skills/run-lint/lint.sh tidy               # clang-tidy via the `tidy` preset
+bash .claude/skills/run-lint/lint.sh warnings           # COMPILER warnings — fails on any
 bash .claude/skills/run-lint/lint.sh format             # clang-format --dry-run (check only)
 bash .claude/skills/run-lint/lint.sh format-file FILE   # clang-format -i on specific files
 bash .claude/skills/run-lint/lint.sh tools              # show resolved tool paths
@@ -130,6 +131,15 @@ Formatting is enforced in two places, both through this script: a `PostToolUse`
 hook formats every C++ file on save, and CI's **blocking** `clang-format` job
 runs `format` over the whole tracked tree. A repo-wide reformat is a deliberate,
 standalone commit (`ARPBOX_ALLOW_FORMAT_FIX=1 ... format-fix`).
+
+`warnings` is a third, separate gate (issue #79) and is also **blocking** in CI.
+clang-tidy runs its own check set and never sees compiler diagnostics, so
+`-Wswitch-enum` and friends — arriving via `juce_recommended_warning_flags`, and
+relied on by name in the codebase — were previously enforced by nothing. The mode
+recompiles every ARPBOX translation unit in the `tidy` preset's single-arch tree
+and fails on any warning in our own sources. It deletes its own object files
+first, self-tests its diagnostic parser, and asserts the warning flags actually
+reach the compiler, so it cannot silently pass by inspecting nothing.
 
 ## Project layout
 
