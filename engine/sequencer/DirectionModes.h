@@ -87,8 +87,10 @@ constexpr bool usesAsPlayedView (DirectionMode mode) noexcept
 
     ── WHY THE STOCHASTIC MODES ARE TABLES, AND WHY THEY DO NOT USE RngStream ──
     `walk` and `randomNoRepeat` are generated HERE, on the message thread, from
-    the pattern's `masterSeed` via an internal `splitmix64`. Phase 7 must not
-    "fix" this to draw from its audio-thread `RngStream`:
+    the pattern's `masterSeed` via `splitmix64` — since Phase 7.1 the shared one
+    in `engine/generative/Rng.h`, salted from that header's append-only
+    `RngDomain` registry rather than from literals local to the .cpp. Phase 7
+    must not "fix" this to draw from its audio-thread `RngStream`:
 
       * They are different consumers. `RngStream` (§5.2, Phase 7.1) is a STATEFUL
         xoshiro256++ stream pulled per step for probability rolls. `splitmix64` is

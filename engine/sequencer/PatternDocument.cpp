@@ -341,6 +341,57 @@ bool PatternDocument::setGrid (double stepPpq)
 }
 
 // MESSAGE-THREAD ONLY:
+bool PatternDocument::setSwing (double swingPct)
+{
+    // A NaN has no nearest legal neighbour and `juce::jlimit` would propagate it
+    // straight onto the snapshot, where every odd step's placed PPQ becomes NaN and
+    // the ownership test silently rejects every event. Reject; do not clamp.
+    if (! std::isfinite (swingPct))
+    {
+        jassertfalse;
+        return false;
+    }
+
+    const double clamped = juce::jlimit (minSwingPct, maxSwingPct, swingPct);
+
+    // EXACT equality, `juce::exactlyEqual` — same reasoning as `setGrid`: the
+    // question is "would the stored bits change", not "are these musically close".
+    // Compared AFTER clamping so 80 -> 75 and a second 80 -> 75 is correctly a
+    // no-op rather than a second undo entry and a second ~120 KB snapshot build.
+    if (juce::exactlyEqual (current.swingPct, clamped))
+        return false;
+
+    beginEdit ();
+    current.swingPct = clamped;
+    endEdit ();
+
+    return true;
+}
+
+// MESSAGE-THREAD ONLY:
+bool PatternDocument::setRatchetVelocityRamp (double rampPct)
+{
+    // Same posture as `setSwing`: reject a NaN (nothing to clamp it to, and it would
+    // reach `llround` in `ratchetVelocity`), clamp anything finite.
+    if (! std::isfinite (rampPct))
+    {
+        jassertfalse;
+        return false;
+    }
+
+    const double clamped = juce::jlimit (minRatchetVelocityRampPct, maxRatchetVelocityRampPct, rampPct);
+
+    if (juce::exactlyEqual (current.ratchetVelocityRampPct, clamped))
+        return false;
+
+    beginEdit ();
+    current.ratchetVelocityRampPct = clamped;
+    endEdit ();
+
+    return true;
+}
+
+// MESSAGE-THREAD ONLY:
 bool PatternDocument::setPool (const PoolSnapshot& pool)
 {
     PoolSnapshot clamped = pool;

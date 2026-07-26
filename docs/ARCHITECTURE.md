@@ -286,7 +286,7 @@ project.arpx
 |---|---|---|
 | `schemaVersion` | int | Bumped on breaking model changes; loaders migrate forward |
 | `rngVersion` | int | RNG stream algorithm version (determinism contract) |
-| `transport` | obj | bpm (20–300), swingPct, grid, quantizeApply |
+| `transport` | obj | bpm (20–300), swingPct (50–75, 50 = straight), ratchetVelocityRampPct (−100..+100, 0 = flat), grid, quantizeApply |
 | `keyScale` | obj | root (0–11), scaleId or custom mask (12 bools) |
 | `mode` | enum | `thru` \| `self` |
 | `patterns[16]` | arr | Per pattern: lanes (per-lane: length, division, steps[]), directionMode, euclid {steps,pulses,rotate}, chordLane[8], operators[≤8] {typeId, amount, seed, laneMask, bypass, params{}}, masterSeed, loopLock, anchors (step/lane masks), macros[4], constraints {scale, rangeLo, rangeHi, foldMode, noteBudget, maxRepeats}, abSlots |
@@ -369,11 +369,11 @@ Plugin editors (§6.4), plugin manager (scan UI, blocklist), settings (audio/MID
 | OCT | −4..+4 | |
 | VEL | 1–127 | |
 | LEN | 1–400 % of step | >100% ⇒ tie/legato |
-| RATCHET | 1–8 | Per-ratchet velocity ramp + probability |
-| MICRO | −50..+50 % step | Swing applies on top |
-| PROB | 0–100 % | |
+| RATCHET | 1–8 | Ratchet children per step. Its ceiling of 8 sizes the whole sub-step geometry (§12.6). Velocity ramp is **project-level** `ratchetVelocityRampPct` (§8.1), not a lane — §12.1 never gave the ramp storage. Per-ratchet probability **reuses the PROB lane**; child 0 is never re-rolled (its fate was decided by the step-level checks), children ≥1 draw from `subStepHash` |
+| MICRO | −50..+50 % step | Swing applies on top. Composed with swing and clamped **once, on the total**, to ±0.5 step (§12.6) |
+| PROB | 0–100 % | ≥100 short-circuits **before** hashing — that is a contract, not an optimisation: it is what makes "`rngVersion: 0` ⇒ consumed no RNG" true of the Phase-6 goldens |
 | COND | enum (§12.2) | |
-| MOD A / MOD B | 0–127 | Mod-matrix sources |
+| MOD A / MOD B | 0–127 | Mod-matrix sources (Phase 14). **MOD A is already read by `NEI`/`!NEI`** (§12.2) — Phase 14.1 must not assume it is unread |
 
 ### 12.2 Trig conditions
 
@@ -386,6 +386,12 @@ Plugin editors (§6.4), plugin manager (scan UI, blocklist), settings (audio/MID
 | Named | `1ST`, `!1ST`, `FILL`, `!FILL` (FILL = held pad 16), `PRE`, `!PRE` (previous step's result), `NEI`, `!NEI` (neighbor mod lane's result) | 8 |
 
 `A:B` is pattern-loop-aware: it fires on loop A of every B loops of the pattern. B is restricted to the powers of two through 16 — matching the Elektron behaviour this set is modelled on — so there is deliberately **no** :3/:5/:6/:7 family. Conditions gate before probability rolls.
+
+**Three semantics §12.2 left underdetermined, resolved by user decision in Phase 7.1 and now frozen in goldens.** Changing any of them alters output for existing seeds and therefore requires an `rngVersion` bump plus a migration note (§5.2), not an edit.
+
+- **D5 — "one loop" is the GATE lane's cycle** (`PatternData::gatePeriodSteps` = GATE length × division), for both `A:B` and `1ST`/`!1ST`. Polymeter means there is no single "pattern loop": every lane carries its own length and division, so the quantity had to be pinned. The GATE cycle was chosen because it is *already* the divisor `gatedOrdinal` uses for the pool cursor — `PatternSnapshot::loopIndexAt` is now the one implementation and `gatedOrdinal` calls it, so "a loop" cannot come to mean two different things in one file. Consequence: changing GATE's length or division retimes every `A:B` in that pattern. The rule is `stepFloorMod (loopIndexAt (…), B) == (A − 1)` — **floor-mod, never `%`**, because step indices go negative and `%` yields residues that match nothing.
+- **D6 — `PRE`/`!PRE` follows the previous GATED step**, not the previous base step: a rest has no result to follow. Made O(1) by a per-pattern `previousGatedOffset` table built in the same pass as `gatePrefixPulses` (+16 KB on the snapshot) so the two cannot disagree about what "gated" means. The chain is **iterative, never recursive, bounded at 8 links**, and a truncated chain resolves to **`false`** — so a PRE run longer than 8 consecutive gated steps decays to silence. That bound is not a performance concession: if every gated step in a cycle carries PRE the recursion has no anchor and admits both all-true and all-false as fixed points, so the base case is what makes the function total. **"Result" includes probability** — a PRE step downstream of a 30 %-probability anchor follows what actually sounded, not what the condition alone would have allowed. Frozen by `tests/golden/cond-pre-chain.txt`, which sits deliberately on the depth-8 boundary.
+- **D7 — `NEI`/`!NEI` reads `MOD A >= 64` at this step.** Elektron's NEI means the neighbouring *track*'s trig result, which has no referent until multi-track (§2.2), so §12.2's own words ("mod lane") were taken literally. This makes MOD A audible three phases before the Phase 14 mod matrix — see §12.1's MOD A/B row.
 
 The enumerator order in `engine/sequencer/PatternTypes.h` (`none`, then the A:B block ascending by B, then the named conditions) **is** the serialized ordinal order for the COND lane in §8.1, and it is append-only: new conditions go after `!NEI`, never interleaved. The header pins the current ordinals with `static_assert`s.
 
@@ -426,6 +432,33 @@ label, which is what makes the suites independently selectable. Test cases are
 additionally named `<suite>/<unit>: <behavior>` (e.g. `determinism/golden: …`), so
 `-R determinism` also happens to match — but the label is the authoritative selector
 and the one CI uses.
+
+### 12.6 Sub-step geometry (ratchets, micro, swing)
+
+Phase 7.2 introduced the first events that do **not** land on a step boundary. Everything here descends from one constant, `maxSubStepShiftSteps = 0.5`: MICRO (±50 %) and swing (up to +0.5 step) are composed additively, micro first, and clamped **once on the total**. Clamping per source would allow ±1.0 and invalidate the scan derivation below, so the clamp lives at a single enforcement point inside `evaluateStep`. The visible cost is a documented saturation (micro +50 with swing 75 equals micro 0 with swing 75).
+
+**Swing** is project-level (§8.1 `transport.swingPct`), like the grid and for the same reason. Odd steps are delayed: `stepFloorMod (n, 2) == 1 ? (swingPct/100 − 0.5) × 2 : 0`. Pairing is on the **global** step index, not the pattern-loop index, so a quantized pattern switch cannot re-phase swing mid-flight.
+
+**Ownership moved from the index to the placed PPQ.** A displaced or ratcheted event can belong to a different block than its step boundary does — at the worst supported step (dotted quarter, 20 BPM, 192 kHz = 864 000 samples) child 7 sits 756 000 samples after its parent. So the unit of ownership is `(index, child)`, tested by `ownsPpq` — **the only ownership test in `SequencerProcessor.cpp`**, using the *same* tolerance expression on both ends so that block *k*'s upper test and block *k+1*'s lower test are the same expression on mathematically equal inputs, and the timeline tiles. Two tolerances would mean an event owned by zero blocks (dropped) or two (duplicated). The walk therefore scans `[firstIndex − 2, endIndex + 1)`; that widening is **tight, not padding** — both bounds are attained. The upper `jlimit` on the block offset became a *reject*; the lower clamp survives as the §12.6/#37 window.
+
+**The tiling is not exact in floating point, and the difference matters to anyone building on it (issue #82).** The two inputs — block *k*'s `blockEndPpq()` and block *k+1*'s `blockStartPpq()` — are computed by different expressions and agree only to within their rounding (~1e-10 steps). Subtracting the same `snapPpq` from both does **not** make them bitwise equal: a gap/overlap of that width survives, *relocated* from the block edge to `edge − snapPpq`. What the snap buys is not closure but **relocation off the attractor**: musical positions are rational multiples of `stepPpq` and pile up on block edges (measured: the two expressions disagree at 24.2 % of 1.08e8 edges, 27123 of those straddling a step boundary), while nothing systematically sits 1e-6 of a step below an edge. So ownership is exact off a measure-zero set — rely on "at most one block owns an event, and exactly one off that set", never on unconditional exactness. Its one non-trivial consequence: were the adopt step's `gridPpq` to land in the gap, the quantized switch would never fire and (since #76) its step's late children would stay suppressed indefinitely. Same residual family as #37 and #75, and **one fix closes all three** — deriving the emission sample from the boundary index against the segment anchor (#37 option (a)) removes the negative block-relative offset that all three descend from.
+
+**Two forbidden implementations**, both of which would break the #37 snap-window analysis by changing its input or adding a second ceiling:
+
+1. **Never implement swing as a modified grid** (halving `stepPpq`, or a separate "swing grid"). Swing is a displacement *within* the grid; the grid is untouched, which is exactly why the #37 table still holds unchanged at 192 kHz.
+2. **Ratchet children must never get their own ceiling.** A `stepPpq / noteCount` sub-grid with its own snapped ceiling is a *different* tolerance at the same block edges — precisely how two adjacent blocks come to disagree about who owns an event.
+
+Honest caveat: the #37 window's **width** is unchanged, but roughly 8× more PPQ values are now tested against block edges per step, so its **hit rate** rose by about that factor.
+
+**Ratchet children are same-pitch retriggers and need no new note-off mechanism.** Child *c*'s off is scheduled at `min(natural end, onset(c+1) − 1)`, and §5.5's 1-sample gap falls out of machinery that predates ratchets.
+
+**But "at most one live entry per `(channel, note)`" — true of every phase before 7.2 — NO LONGER HOLDS**, and an earlier revision of this section wrongly gave it as the reason ratchets were free. Sub-step displacement means emission order is no longer sample order, so `SoundingNoteTable::findStartedAtOrBefore` deliberately declines to retire a same-pitch entry that *starts later* than the incoming note (retiring it produced a zero-length note on some buffer sizes and not others — issue #77, the #36/#46/#48 family again). Declining adds a second live entry for that pitch. The bound is therefore no longer 1, and it is derived in two steps. First, an inversion is only possible between indices *i* and *i + k* when `2 × maxSubStepShiftSteps + maxChildAheadSteps > k`, i.e. `1.875 > k` — so **only adjacent indices can invert**, and the out-of-order band is two indices wide. (The 1.875 is what *proves* the band is two wide; the band is not itself 1.875 steps of anything. It is the same quantity `retriggerScanBackSteps` is derived from, which is why the backward retrigger scan reaches exactly one step.) Second, the band's two indices carry at most 8 children each, so the same-pitch live count is **≤ 16** per pitch. `capacity = 256` keeps an order of magnitude over that.
+
+**16 is a ceiling, not an expectation** — worth knowing before someone reads it as a typical figure. Children *within* one step still have monotonically increasing onsets, so they still retire each other, and at most one decline can therefore occur per step index. On the `ratchet-swing-retrigger` geometry, sampled between blocks (i.e. after `emitDueNoteOffs`), the live count is **1** per pitch at every swept block size; hand-tracing the same geometry puts the *intra-block* peak at **2** — the declined entry plus the one just added. The intra-block peak is not directly instrumented; what bounds it in practice is `tests/pattern_alloc_guard.cpp`'s armed 8-ratchet scenario asserting zero refused note-ons, which would fire long before 256. Size a change off the 16 ceiling; do not expect it, and do not size one off the retracted one-per-pitch claim, which would undersize it.
+
+Child onsets are derived independently from the parent (`c × stepPpq / noteCount`), **never** by cumulative addition of a rounded slot: at `noteCount == 7` the slot is 822.857 samples and cumulative rounding drifts the last child by ~6 samples. LEN applies to a child's **own slot**, not to the whole step — identical at `noteCount == 1`, and the only reading under which LEN > 100 % ties across children the way it ties across steps.
+
+**The lookahead's monotonicity assumption is dead.** `cutoffForSamePitch` may no longer break early on the first candidate past the natural due sample: step *k* shifted +0.5 places child 7 at +1.375 steps while step *k+1* shifted −0.5 places child 0 at +0.5, an inversion of 0.875 steps. It scans a bounded window in both directions and takes the **minimum** qualifying onset. `maxRetriggerLookaheadSteps` is consequently **derived, never chosen** — `ceil(LEN cap 4.0 + child position 0.875 + 2 × shift 0.5) + 1 = 7` — and lives at namespace scope so tests can name it rather than hand-copy it (issue #69).
 
 ---
 

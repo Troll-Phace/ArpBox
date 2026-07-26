@@ -83,6 +83,26 @@ add_library(arpbox_engine STATIC
     sequencer/PatternChannel.h
     sequencer/PatternDocument.h
     sequencer/PatternDocument.cpp
+    # Phase 7.1 — the FIRST occupant of generative/ (ARCHITECTURE §3.2 assigns
+    # "seeds" here; the header comment above still calls this directory "populated
+    # by later phases", and this is that phase). Header-only and all-constexpr:
+    # splitmix64 as a pure hash, the append-only RngDomain salt registry, the
+    # per-step `stepHash`, and the `rngVersion` constant §8.1 serializes. It is
+    # the SINGLE owner of the primitive — DirectionModes.cpp's local copy was
+    # deleted in favour of it, bit-identically. Listed here (no .cpp) so it
+    # surfaces in IDEs and travels with the target.
+    generative/Rng.h
+    # Phase 7.1 step logic (ARCHITECTURE §5.1 L2, §12.2): the per-step probability
+    # roll and the 39 trig conditions, as FREE FUNCTIONS with no class and no state
+    # — the same anti-cursor posture issue #53 gave `evaluateStep`, which calls
+    # both between the GATE check and the pool read.
+    sequencer/StepLogic.h
+    sequencer/StepLogic.cpp
+    # Phase 7.2 provenance (ARCHITECTURE §5.4): the X-RAY bitmask every emitted note
+    # carries. Header-only and all-constexpr. It lands with ratchets rather than with
+    # Phase 17's X-RAY view because 7.2 is the phase in which a note first has a
+    # source other than "the step" — see the header.
+    sequencer/Provenance.h
     EngineGuiGuard.h)
 
 target_compile_features(arpbox_engine PUBLIC cxx_std_20)

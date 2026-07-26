@@ -42,12 +42,31 @@ enum class LaneId : std::uint8_t
     oct,      ///< −4..+4 octaves.
     vel,      ///< 1–127 MIDI velocity.
     len,      ///< 1–400 % of step; >100% ⇒ tie/legato (§5.5).
-    ratchet,  ///< 1–8 subdivisions. STORED in Phase 6, EVALUATED by Phase 7.2.
-    micro,    ///< −50..+50 % step. STORED in Phase 6, EVALUATED by Phase 7.2.
-    prob,     ///< 0–100 %. STORED in Phase 6, EVALUATED by Phase 7.1.
-    cond,     ///< TrigCondition ordinal. STORED in Phase 6, EVALUATED by Phase 7.1.
-    modA,     ///< 0–127 mod source. STORED in Phase 6, EVALUATED by Phase 14.1.
-    modB,     ///< 0–127 mod source. STORED in Phase 6, EVALUATED by Phase 14.1.
+    /** 1–8 subdivisions. EVALUATED (Phase 7.2) — `ratchetChildCount` in
+        sequencer/StepLogic.h fills `StepEmission`'s note list from it, and the
+        RATCHET CEILING SIZES THE WHOLE SUB-STEP GEOMETRY: `maxRatchetChildren`,
+        `maxChildAheadSteps`, the step walk's scan widening and the retrigger
+        lookahead's reach are all `constexpr` expressions of `laneRange
+        (LaneId::ratchet).hi` (sequencer/SequencerProcessor.h). Raising this lane's
+        range is therefore not a local change — the `static_assert`s there are what
+        stop it being made as one. */
+    ratchet,
+
+    /** −50..+50 % step. EVALUATED (Phase 7.2) — composed with the project-level
+        `swingPct` into `StepEmission::shiftSteps` and clamped ONCE, inside
+        `evaluateStep`, to `maxSubStepShiftSteps`. */
+    micro,
+    prob, ///< 0–100 %. EVALUATED (Phase 7.1) — sequencer/StepLogic.h.
+    cond, ///< TrigCondition ordinal. EVALUATED (Phase 7.1) — sequencer/StepLogic.h.
+    /** 0–127 mod source. **EVALUATED SINCE PHASE 7.1**, three phases before the
+        Phase 14 mod matrix it was originally annotated for. User decision D7 gives
+        §12.2's `NEI`/`!NEI` conditions their v1 meaning as `MOD A >= 64` at the
+        step (`neighbourModThreshold` in sequencer/StepLogic.h), which makes this
+        lane AUDIBLE now. Phase 14.1 must not assume MOD A is an unread lane it can
+        repurpose freely: changing what this value means changes which steps fire
+        in every pattern that uses a NEI condition. */
+    modA,
+    modB, ///< 0–127 mod source. STORED in Phase 6, EVALUATED by Phase 14.1.
     count
 };
 
@@ -449,6 +468,55 @@ constexpr LaneState& laneOf (PatternState& state, LaneId lane) noexcept
     return state.lanes[static_cast<std::size_t> (lane)];
 }
 
+// ── SWING (§8.1 `transport.swingPct`) ────────────────────────────────────────
+// PROJECT-LEVEL, exactly like the grid, and for the same reason: §8.1 groups it
+// under `transport {bpm, swingPct, grid, quantizeApply}`. It is deliberately NOT
+// on `PatternState` (it is not per pattern — a quantized pattern switch must not
+// change the feel mid-flight, the same argument the grid note above makes) and
+// deliberately NOT on `engine::Transport` (the emission core `evaluateStep`
+// cannot reach the transport by construction — issue #53 — so parking swing there
+// would force it out of the emission core and into the walk, which is precisely
+// what the one-lane-read-path discipline forbids).
+//
+// 50 % is STRAIGHT: `swingShiftSteps` (sequencer/StepLogic.h) turns it into a
+// displacement of exactly 0.0 steps, which is what makes every pre-7.2 golden
+// provably unmoved by this field rather than approximately unmoved.
+
+/** Straight timing — every step on its grid position. The default. */
+inline constexpr double minSwingPct = 50.0;
+
+/** Maximum swing: odd steps delayed by a full half step (`maxSubStepShiftSteps`
+    in sequencer/SequencerProcessor.h is derived partly from this). */
+inline constexpr double maxSwingPct = 75.0;
+
+/** Default swing amount — straight. */
+inline constexpr double defaultSwingPct = minSwingPct;
+
+// ── RATCHET VELOCITY RAMP (§5.1 L2 "per-ratchet velocity ramp") ──────────────
+// A PERCENTAGE applied to the LAST ratchet child, interpolated linearly from 0 %
+// at child 0 (see `ratchetVelocity` in sequencer/StepLogic.h). -50 halves the
+// last child (a roll that decays); +50 makes it half again as loud.
+//
+// ── WHY PROJECT-LEVEL RATHER THAN A LANE ────────────────────────────────────
+// §5.1 L2 requires the ramp, but §12.1's lane table has no lane for it and §8.1's
+// per-pattern schema no key — because it is a FEEL control of exactly the kind
+// §8.1 groups under `transport`, the same argument swing above gets. A per-step
+// ramp would also be the wrong ergonomics: the RATCHET lane already varies the
+// child COUNT per step, and varying the envelope per step as well is what §12.4's
+// RATCHETIZER operator ("amount, beat weighting") is for.
+//
+// 0 IS THE DEFAULT AND IS SHORT-CIRCUITED, so every child of a default project
+// carries the step's own VEL byte-identically and no pre-7.2 golden can move.
+
+/** Ramp floor: the last child is silenced down to VEL's minimum. */
+inline constexpr double minRatchetVelocityRampPct = -100.0;
+
+/** Ramp ceiling: the last child is twice the step's VEL (clamped at 127). */
+inline constexpr double maxRatchetVelocityRampPct = 100.0;
+
+/** Default ramp — flat; every child carries the step's own VEL. */
+inline constexpr double defaultRatchetVelocityRampPct = 0.0;
+
 /** The whole pattern set plus the project-level fields the sequencer needs
     (ARCHITECTURE §8.1). This is the state a `PatternSnapshot` is built from; it is
     NOT itself the snapshot (that is a later delegation).
@@ -456,13 +524,23 @@ constexpr LaneState& laneOf (PatternState& state, LaneId lane) noexcept
     `gridStepPpq` is the length of ONE pattern step in quarter notes: 0.25 = 1/16,
     0.5 = 1/8, 0.125 = 1/32, and triplet/dotted grids are the same values scaled by
     2/3 and 3/2 (§2.1 "1/32..1/4, triplet/dotted"). It is TOP-LEVEL, not per
-    pattern — see the note on `PatternState`. */
+    pattern — see the note on `PatternState`. So is `swingPct` — see above. */
 struct PatternSetState
 {
     std::array<PatternState, maxPatterns> patterns {}; ///< §8.1 `patterns[16]`.
     double gridStepPpq = 0.25;                         ///< One step in quarter notes (1/16 default).
-    int startPatternIndex = 0;                         ///< Pattern active at transport start, 0..maxPatterns-1.
-    int outputChannel = 1;                             ///< MIDI channel the engine emits on, 1..16.
-    PoolSnapshot pool {};                              ///< L0 note pool view (§5.1); stub-filled in Phase 6.
+    double swingPct = defaultSwingPct;                 ///< §8.1 `transport.swingPct`, 50..75 (50 = straight).
+
+    /** §5.1 L2 ratchet velocity ramp, -100..+100 % applied to the LAST child
+        (0 = flat). PROJECT-LEVEL for the same reason as swing — see
+        `minRatchetVelocityRampPct` ABOVE IN THIS HEADER, beside the swing range,
+        where the bounds and the "why not a lane" argument live. (sequencer/
+        StepLogic.h holds the ramp's only CONSUMER, `ratchetVelocity`; it points
+        back here for the constants, so a pointer in that direction was circular.) */
+    double ratchetVelocityRampPct = 0.0;
+
+    int startPatternIndex = 0; ///< Pattern active at transport start, 0..maxPatterns-1.
+    int outputChannel = 1;     ///< MIDI channel the engine emits on, 1..16.
+    PoolSnapshot pool {};      ///< L0 note pool view (§5.1); stub-filled in Phase 6.
 };
 } // namespace arpbox::engine

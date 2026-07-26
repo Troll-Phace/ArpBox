@@ -8,6 +8,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 
@@ -45,12 +46,40 @@ namespace
                 clampLaneValue (laneId, source.values[static_cast<std::size_t> (step)]);
     }
 
-    /** Sums the (already clamped) GATE lane into `data`'s exclusive prefix table.
+    /** THE gated predicate for one base step of a GATE cycle, in the ONE place both
+        derived tables read it from.
+
+        `PatternSnapshot::isGated` states the same rule for an arbitrary global step
+        (via `isLaneTick` + `laneValueAt`); inside one cycle `p < length * division`
+        guarantees `p / division < length`, so no modulus is needed and this is the
+        cheaper form. Both `gatePrefixPulses` and `previousGatedOffset` are summed
+        from THIS function so they cannot drift apart from each other — the same
+        argument the `isGated` note makes for the prefix table and the step tick. */
+    constexpr bool isGatedPhase (const LaneState& gate, int division, int p) noexcept
+    {
+        return (p % division) == 0 && gate.values[static_cast<std::size_t> (p / division)] != 0;
+    }
+
+    /** Sums the (already clamped) GATE lane into `data`'s exclusive prefix table and
+        fills its previous-gated-step offset table.
 
         Walks the lane's FULL cycle — `length * division` base steps — because that
-        is the period over which the gated-step count repeats. Within one cycle the
-        lane index is a plain `p / division` with no modulus needed, since
-        `p < length * division` guarantees `p / division < length`. */
+        is the period over which the gated-step count repeats.
+
+        ── TWO LINEAR PASSES, NEVER O(period^2) ────────────────────────────────
+        The obvious way to fill `previousGatedOffset` is "for each phase, scan
+        backwards until a gated step" — 512 x 512 = 262,144 predicate evaluations
+        per pattern, x16 patterns, on EVERY document rebuild, and §4's message-thread
+        edit flow rebuilds the whole snapshot on every piano-roll mouse move. So:
+
+          pass 1 (the existing prefix loop) also records the LAST gated phase of the
+                 cycle, which by periodicity is phase 0's predecessor;
+          pass 2 carries a running "previous gated phase" — seeded to that
+                 wrap-around value, expressed as a NEGATIVE index so the subtraction
+                 needs no special case at the seam — and writes `p - previous`.
+
+        Both passes are O(period). The result is in `[1, periodSteps]`, or all-zero
+        when the cycle has no gated step at all (§12.2 D6's base case). */
     void buildGatePrefix (PatternData& data) noexcept
     {
         const LaneState& gate = data.lanes[static_cast<std::size_t> (LaneId::gate)];
@@ -63,21 +92,40 @@ namespace
         data.gatePeriodSteps = periodSteps;
 
         int running = 0;
+        int lastGatedPhase = -1; // -1 ⇒ the cycle contains no gated step
 
+        // PASS 1 — exclusive prefix sum, plus the wrap-around anchor for pass 2.
         for (int p = 0; p < periodSteps; ++p)
         {
             // EXCLUSIVE prefix: write the running total BEFORE counting step p, so
             // the first gated step of the cycle gets ordinal 0.
             data.gatePrefixPulses[static_cast<std::size_t> (p)] = static_cast<std::uint16_t> (running);
 
-            const bool onTick = (p % division) == 0;
-            const bool held = gate.values[static_cast<std::size_t> (p / division)] != 0;
-
-            if (onTick && held)
+            if (isGatedPhase (gate, division, p))
+            {
                 ++running;
+                lastGatedPhase = p;
+            }
         }
 
         data.gatePulsesPerLoop = running;
+
+        if (lastGatedPhase < 0)
+            return; // no anchor anywhere in the cycle; leave the table all-zero
+
+        // PASS 2 — previous-gated distance. `previous` starts one full cycle back at
+        // the last gated phase (periodicity), so it is <= -1 and `p - previous` is
+        // >= 1 at p == 0 with no branch at the wrap seam. It never exceeds
+        // `periodSteps` (the case where exactly one phase in the cycle is gated).
+        int previous = lastGatedPhase - periodSteps;
+
+        for (int p = 0; p < periodSteps; ++p)
+        {
+            data.previousGatedOffset[static_cast<std::size_t> (p)] = static_cast<std::uint16_t> (p - previous);
+
+            if (isGatedPhase (gate, division, p))
+                previous = p;
+        }
     }
 
     /** Fills `set`'s traversal tables for EVERY pool size 0..maxPoolSize (see the
@@ -135,6 +183,23 @@ std::unique_ptr<const PatternSnapshot> buildPatternSnapshot (const PatternSetSta
     auto snapshot = std::make_unique<PatternSnapshot> ();
 
     snapshot->gridStepPpq = state.gridStepPpq > 0.0 ? state.gridStepPpq : 0.25;
+
+    // CLAMPED HERE, ON THE MESSAGE THREAD, like every lane value: the RT path must
+    // never see a swing outside [50, 75], because `maxSubStepShiftSteps` — and
+    // therefore the step walk's scan widening — is DERIVED from that ceiling. A
+    // NaN would also poison every placed PPQ, so it is rejected to the default
+    // rather than clamped (jlimit propagates NaN).
+    snapshot->swingPct =
+        std::isfinite (state.swingPct) ? juce::jlimit (minSwingPct, maxSwingPct, state.swingPct) : defaultSwingPct;
+
+    // Same treatment, same reasons: the RT path must never see an out-of-range ramp,
+    // and a NaN ramp would turn every ratchet child's velocity into a NaN and then,
+    // through `llround`, into an unspecified integer.
+    snapshot->ratchetVelocityRampPct =
+        std::isfinite (state.ratchetVelocityRampPct)
+            ? juce::jlimit (minRatchetVelocityRampPct, maxRatchetVelocityRampPct, state.ratchetVelocityRampPct)
+            : defaultRatchetVelocityRampPct;
+
     snapshot->startPatternIndex =
         static_cast<std::int32_t> (juce::jlimit (0, maxPatterns - 1, state.startPatternIndex));
     snapshot->outputChannel = static_cast<std::int32_t> (juce::jlimit (1, 16, state.outputChannel));
@@ -164,6 +229,13 @@ std::unique_ptr<const PatternSnapshot> buildPatternSnapshot (const PatternSetSta
         data.direction = mode;
         data.asPlayedView = direction::usesAsPlayedView (mode);
         data.traversalSetIndex = internTraversalSet (*snapshot, mode, source.masterSeed);
+
+        // PHASE 7.1: the seed now also has to reach the AUDIO THREAD, for the §5.1 L2
+        // probability roll. Before this line it was consumed only by the line above —
+        // on the message thread, to intern a traversal set — so the RT path had no
+        // route to it at all. Copying it onto the snapshot is that route; the step
+        // tick must never reach back into the document for it.
+        data.masterSeed = source.masterSeed;
 
         buildGatePrefix (data);
     }

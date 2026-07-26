@@ -86,7 +86,7 @@ public:
         A plain `store` LEAKS. Publish S2; the audio thread has not reached a
         quantize boundary yet; publish S3. S2's pointer is now unreachable, and the
         only code that ever retires a snapshot is the audio thread — which never
-        saw S2. Under a piano-roll drag that is one leaked ~100 KB snapshot per
+        saw S2. Under a piano-roll drag that is one leaked ~120 KB snapshot per
         mouse move.
 
         `exchange` returns the displaced pointer, and exactly ONE side can win the

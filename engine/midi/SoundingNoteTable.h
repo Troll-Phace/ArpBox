@@ -22,11 +22,27 @@ namespace arpbox::engine
     `isEmpty()` must be true (asserted by the MIDI-conformance suite).
 
     ── THE PLACEMENT RULE (issues #36, #46, #48 — ONE FAILURE CLASS) ───────────
-    NO NOTE-OFF IS EVER EMITTED LATER THAN ITS OWN SCHEDULED DUE SAMPLE. Every
-    emission path below places its off at `min (entry.dueOffSample, whatever the
-    caller asks for)`, converted to a block offset by the ONE private conversion
-    (`offsetForSample`). A caller can only ever move an off EARLIER — cut a note
-    short — and can never move one later.
+    NO NOTE-OFF IS EVER EMITTED LATER THAN ITS OWN SCHEDULED DUE SAMPLE, AND NEVER
+    EARLIER THAN ITS OWN NOTE-ON. Every emission path below places its off at
+
+        min (entry.dueOffSample, max (entry.onSample, whatever the caller asks for))
+
+    converted to a block offset by the ONE private conversion (`offsetForSample`).
+    A caller can only ever move an off EARLIER — cut a note short — and only as far
+    back as the sample the note started on.
+
+    THE LOWER HALF OF THAT CLAMP IS NEW IN PHASE 7.2 AND IS NOT DEFENSIVE PADDING.
+    Until sub-step displacement existed, the caller's step walk emitted notes in
+    SAMPLE order, so every entry in this table had started at or before whatever
+    sample the caller was talking about and the bound could not bind. It binds now:
+    the walk visits step INDICES in order, and displacement breaks the
+    correspondence between index order and sample order. Concretely, at swing 75
+    step k is placed at k+0.5 and step k+1 at k+0.5 as well — the same sample — so
+    for a one-note pool the walk emits step k's note-on at X, then reaches step k+1
+    and asks this table to retire that entry at `X - 1`. Without the lower clamp the
+    off lands one sample BEFORE its own on: the synth receives an orphan note-on and
+    holds it forever. With it, the off lands at X, co-located, and
+    `juce::MidiBuffer`'s stable ordering keeps the sequence on / off / on.
 
     That rule is the whole of a bug family this class kept re-growing. Three
     separate defects, one shape each time: a note-off placed from a WITHIN-BLOCK
@@ -118,10 +134,32 @@ namespace arpbox::engine
     ── CAPACITY & OVERFLOW ─────────────────────────────────────────────────────
     Fixed `capacity` entries, allocated inside the object (a `std::array`); this
     class never allocates, at any point in its life. The bound covers 16 MIDI
-    channels x 16 simultaneous notes. Realistic worst case for the MVP is far
-    lower: one channel, a note pool bounded by the held chord, up to 8 ratchet
-    children per step (§12.1) and LEN up to 400% allowing ~4 steps of overlap —
-    order 64 notes. `capacity` leaves ~4x headroom.
+    channels x 16 simultaneous notes.
+
+    RATCHETS ADD ALMOST NOTHING TO THE LIVE COUNT, and an earlier version of this
+    paragraph got that badly wrong — it multiplied the overlap estimate by "up to 8
+    ratchet children per step" and arrived at order 64 notes. The count is bounded by
+    DISTINCT SOUNDING PITCHES, not by note-ons: a ratchet's children all share their
+    parent's pitch and each retires its predecessor, so an 8-ratchet step occupies
+    essentially one slot however many note-ons it emits.
+
+    ── "ONE LIVE ENTRY PER (channel, note)" NO LONGER HOLDS EXACTLY (issue #77) ──
+    It held for every phase before 7.2, because every `add` was preceded by a
+    find-and-retire of the same pitch. Since 7.2 the caller retires only an entry
+    that STARTED AT OR BEFORE the incoming note (`findStartedAtOrBefore`), because
+    its emission order is no longer sample order — so a pitch can briefly carry two
+    entries: one already sounding, and one belonging to a displaced event that the
+    walk reached early. The extra entries are bounded by how far out of sample order
+    an event can be, which the sub-step geometry caps at
+    `2 * maxSubStepShiftSteps + maxChildAheadSteps` = 1.875 steps, i.e. at most two
+    steps' worth of children ~= 16 per pitch.
+
+    So the realistic MVP worst case is: one channel, LEN 400 % allowing a note to
+    span ~4 steps, hence ~5 consecutive steps' pitches alive at once, each a distinct
+    pool degree, plus the out-of-order band above — order tens of entries, not
+    hundreds. `capacity` leaves an order of magnitude of headroom. DO NOT SIZE A
+    FUTURE CHANGE OFF THE OLD PREMISE: polyphony comes from the note pool, from LEN,
+    and marginally from displacement — never from the RATCHET lane's count itself.
 
     On overflow `add()` returns FALSE and the caller must NOT emit the note-on. The
     asymmetry is deliberate and load-bearing: dropping a note-ON costs one missing
@@ -158,8 +196,55 @@ public:
 
     // RT-SAFE: audio thread. Linear scan over `size()` entries; no allocation.
     /** Index of the sounding entry for (`channel`, `note`), or -1 if that pitch is
-        not currently sounding. Used to implement the same-pitch retrigger policy. */
+        not currently sounding.
+
+        SINCE PHASE 7.2 THIS CAN RETURN AN ENTRY THAT HAS NOT SOUNDED YET — see
+        `findStartedAtOrBefore`, which is what the same-pitch retrigger policy must
+        use. This overload survives for observation and for callers that genuinely
+        mean "is this pitch tracked at all". */
     int find (int channel, int note) const noexcept;
+
+    // RT-SAFE: audio thread. Linear scan over `size()` entries; no allocation.
+    /** Index of the (`channel`, `note`) entry whose own note-ON is at or before
+        absolute `sample` — the LATEST such entry — or -1 if there is none.
+        `sample` is the incoming note's onset.
+
+        ── WHY THE RETRIGGER POLICY NEEDS THIS AND NOT `find` (issue #77) ──────
+        Because THE CALLER'S EMISSION ORDER IS NO LONGER SAMPLE ORDER. The step walk
+        visits step INDICES in order, and sub-step displacement breaks the
+        correspondence: the walk reaches index -1 before index 0, so step -1's child
+        6 — pushed to sample 337 by swing plus a 7/8-step child offset — is
+        registered BEFORE step 0's child 0 at sample 0, but only when both fall in
+        the same block.
+
+        `find` then hands the note at 0 an entry that starts at 337, the retrigger
+        branch computes `capSample = onSample - 1 = -1`, and THE PLACEMENT RULE's
+        floor pins the off to the entry's own onset — a ZERO-LENGTH note at 337. At
+        a smaller block the two land in different blocks, the note at 0 has already
+        been retired, and the entry keeps the cutoff `cutoffForSamePitch` correctly
+        computed for it.
+
+        MEASURED (137 BPM / 44.1 kHz, 1/16 grid, RATCHET 8, swing 66 %, LEN 150 %,
+        one-note pool — the `ratchet-swing-retrigger` golden): the note-on at 337
+        had its off at 602 (correct: `next same-pitch onset - 1` against the onset at
+        603) at blocks 32, 64, 96, 128, 256, and at 337 at blocks 480, 512, 1024,
+        2048, 4096. Five of ten. Same music, different bytes, decided by the DEVICE
+        BUFFER SIZE — a §1.2 violation and the #36/#46/#48 family again.
+
+        AN ENTRY STARTING LATER IS NOT WHAT THIS NOTE IS RETRIGGERING. It is a note
+        that has not sounded yet, and the incoming (earlier) note's own
+        `cutoffForSamePitch` has ALREADY scheduled itself to end before it — that
+        scan looks backward as well as forward and takes the minimum qualifying
+        onset, which is precisely why the small-block carvings were right.
+
+        ── THE CONSEQUENCE FOR THE LIVE COUNT, STATED OUT LOUD ────────────────
+        Skipping such an entry means a second entry for the same (channel, note) is
+        added, so "at most one live entry per pitch" — true for every phase before
+        7.2 — NO LONGER HOLDS. See the capacity discussion above for the new bound.
+        THE LATEST qualifying entry is returned rather than the first, so that with
+        several same-pitch entries live the one retired is unambiguously the note
+        this one is taking over from. */
+    int findStartedAtOrBefore (int channel, int note, std::int64_t sample) const noexcept;
 
     // RT-SAFE: audio thread. Pure query; no allocation.
     /** True when entry `index`'s scheduled note-off is due at or before absolute
@@ -193,25 +278,31 @@ public:
     int dueOffsetWithinBlock (int index, std::int64_t blockStartSample, int numSamples) const noexcept;
 
     // RT-SAFE: audio thread.
-    /** Registers a sounding note whose note-off is due at `dueOffSample`
-        (absolute samples). Does NOT emit the note-on — the caller does, and MUST
-        NOT emit it if this returns false.
+    /** Registers a sounding note that STARTS at `onSample` and whose note-off is
+        due at `dueOffSample` (both absolute samples). Does NOT emit the note-on —
+        the caller does, and MUST NOT emit it if this returns false.
+
+        `onSample` IS THE FLOOR OF "THE PLACEMENT RULE" (see above): no emission
+        path will place this note's off before it. Pass the sample the note-on is
+        actually emitted at, not the step's grid position — under sub-step
+        displacement those differ, and the floor has to be the real one.
 
         @returns false if the table is full (the note-on must be suppressed). */
-    bool add (int channel, int note, std::int64_t dueOffSample) noexcept;
+    bool add (int channel, int note, std::int64_t onSample, std::int64_t dueOffSample) noexcept;
 
     // RT-SAFE: audio thread.
-    /** Emits the note-off for entry `index` at `min (its own due sample,
-        capSample)` — converted into the block starting at `blockStartSample` and
-        running `numSamples` samples — and removes the entry. `index` must come
-        from `find()`; out-of-range indices are ignored.
+    /** Emits the note-off for entry `index` at `min (its own due sample, max (its
+        own on sample, capSample))` — converted into the block starting at
+        `blockStartSample` and running `numSamples` samples — and removes the entry.
+        `index` must come from `find()`; out-of-range indices are ignored.
 
-        THE CAP CAN ONLY SHORTEN, NEVER EXTEND (see "THE PLACEMENT RULE" above).
-        That is why this takes an absolute sample rather than an offset: the form it
-        replaces, `retireAt (index, midi, jmax (0, offset - 1))`, silently became
-        `offset` whenever the buffer size put the caller's event on a block head
-        (#46) and dragged an already-owed off to wherever the retrigger happened to
-        land (#36). Neither is expressible through this signature. */
+        THE CAP CAN ONLY SHORTEN, NEVER EXTEND, AND NEVER PAST THE NOTE'S OWN ON
+        (see "THE PLACEMENT RULE" above). That is why this takes an absolute sample
+        rather than an offset: the form it replaces, `retireAt (index, midi, jmax (0,
+        offset - 1))`, silently became `offset` whenever the buffer size put the
+        caller's event on a block head (#46) and dragged an already-owed off to
+        wherever the retrigger happened to land (#36). Neither is expressible
+        through this signature. */
     void retireNoLaterThan (int index,
                             juce::MidiBuffer& midi,
                             std::int64_t capSample,
@@ -295,13 +386,55 @@ public:
     void reset () noexcept;
 
 private:
-    /** One sounding note. 16 bytes; `capacity` of them is 4 KB, held by value. */
+    /** One sounding note. 24 bytes; `capacity` of them is 6 KB, held by value. */
     struct Entry
     {
         std::int64_t dueOffSample = 0; ///< Absolute sample at which the note-off is due.
-        std::uint8_t channel = 0;      ///< MIDI channel, 1..16.
-        std::uint8_t note = 0;         ///< MIDI note number, 0..127.
+
+        /** Absolute sample the note-ON was emitted at — the FLOOR of "THE PLACEMENT
+            RULE". Stored rather than inferred because nothing else in this object
+            knows it, and because the caller's emission order stopped being sample
+            order when Phase 7.2 introduced sub-step displacement. */
+        std::int64_t onSample = 0;
+
+        std::uint8_t channel = 0; ///< MIDI channel, 1..16.
+        std::uint8_t note = 0;    ///< MIDI note number, 0..127.
     };
+
+    // RT-SAFE: THE ONE IMPLEMENTATION OF "THE PLACEMENT RULE" (see the class
+    // comment). The absolute sample entry `entry`'s note-off is emitted at, given
+    // what the caller asked for:
+    //
+    //     min (entry.dueOffSample, max (floor, capSample))
+    //
+    // Every emission path routes through here, so the rule exists once rather than
+    // at four call sites — the same argument `offsetForSample` below is built on, one
+    // level up. `emitDueNoteOffs` and the already-ended half of `flush` pass the
+    // entry's own due sample as the cap, which makes them the identity case.
+    //
+    // ── THE FLOOR IS THE NOTE'S OWN ON SAMPLE, BUT ONLY IF IT IS IN THIS BLOCK ──
+    // AND THAT QUALIFICATION IS NOT DEFENSIVE — IT IS THE WHOLE CORRECTNESS OF THE
+    // FLOOR. `Entry::onSample` is a point on the sample timeline that was current
+    // when the note was registered, and THE SAMPLE TIMELINE IS NOT MONOTONIC ACROSS
+    // A LOCATE (see "SCHEDULING UNIT" above): `transportStop` rewinds to PPQ 0, so
+    // the flush that immediately follows runs in a block whose `blockStartSample` is
+    // 0 while the entries it is releasing carry on samples from deep in the old
+    // timeline. Taking `max (122400, -1)` there and converting it against a block at
+    // 0 puts the note-off at the block's LAST sample instead of its first.
+    //
+    // MEASURED, by omitting the qualification: 13 tests red, including a golden —
+    // the terminating stop-flush off in `sequencer_retrigger`'s tied sweep moved
+    // from 122880 to 123007 (= 122880 + 127, i.e. the upper clamp at a 128-sample
+    // block), and 122880 was correct.
+    //
+    // So an on sample OUTSIDE this block cannot be trusted to be comparable, and the
+    // floor falls back to this block's head — which is a no-op for every entry that
+    // legitimately started in an earlier block on the same timeline, because the cap
+    // such an entry gets is at or above the block head anyway.
+    static std::int64_t placementSampleFor (const Entry& entry,
+                                            std::int64_t capSample,
+                                            std::int64_t blockStartSample,
+                                            int numSamples) noexcept;
 
     // RT-SAFE: THE ONE absolute-sample → block-offset conversion, and the choke
     // point every emission path in this class goes through. Exact integer

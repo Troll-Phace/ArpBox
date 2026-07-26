@@ -221,6 +221,84 @@ add_executable(arpbox_tests
     # versioned RngStream would force an immediate regeneration. See the omission note
     # in the file; they keep their property tests in pattern_directions.cpp.
     determinism_goldens.cpp
+    # ── Phase 7.1: the bit-identity pins for engine/generative/Rng.h, the shared
+    # RNG primitive (splitmix64 as a pure hash, the append-only RngDomain salt
+    # registry, stepHash, rngVersion).
+    #
+    # THE FAILURE CLASS THIS CLOSES IS A BLIND SPOT, NOT A REGRESSION. Before this
+    # file nothing in the suite constrained splitmix64's constants: the six baked
+    # goldens deliberately exclude `walk` and `randomNoRepeat` (see the omission
+    # note at determinism_goldens.cpp:41-55), and pattern_directions.cpp covers
+    # those two modes with PROPERTY tests — period, ±1 steps, reflection,
+    # no-repeat-across-the-loop-point — every one of which a changed multiplier
+    # survives. So a typo'd constant silently altered the sound of every
+    # stochastic pattern while all 202 tests stayed green.
+    #
+    # It also pins the THREE EXACT CALL EXPRESSIONS in DirectionModes.cpp, whose
+    # XOR shape and salt literals Phase 7.1's migration had to preserve
+    # bit-for-bit. Rng.h's static_assert is the compile-time half of this guard;
+    # this is the runtime half plus everything the assert cannot see.
+    rng_primitive.cpp
+    # ── Phase 7.1: the L2 step-logic semantics (engine/sequencer/StepLogic.{h,cpp}).
+    # These are what say the Phase-7 goldens are baked from the RIGHT rhythm — a
+    # golden that froze a wrong `3:4` would be a permanently wrong reference, so the
+    # semantics have to be pinned separately and FROM §12.2 rather than from the
+    # implementation.
+    #
+    # step_conditions: the 39-entry truth table against a hand-written expectation,
+    # the 30 (A, B) pairs against 30 LITERAL rows (PatternTypes.h's static_asserts pin
+    # the ORDINALS and StepLogic.h's `abDecodeIsExhaustive` pins that the decode
+    # agrees with the enum's declaration order — both are internal consistency; the
+    # literal table is the outside witness), the acceptance criterion "3:4 fires on
+    # loop indices exactly {2, 6}" as a SET, 1ST/A:B at NEGATIVE indices (step_purity
+    # swept below zero but only ever asserted self-consistency — a uniformly wrong
+    # verdict there is perfectly self-consistent, so nothing asserted a condition's
+    # VALUE at a negative index), the whole of D6's PRE chain including the depth-8
+    # truncation boundary and both unanchored base cases, D7's MOD A >= 64 threshold,
+    # and the forward-compatibility `default:` arm that must degrade an unknown COND
+    # ordinal to "no condition" rather than to silence.
+    step_conditions.cpp
+    # step_probability: seed-exactness against a reference implementation written
+    # LONGHAND in the test (splitmix64's body, the 0x5052 domain salt, stepHash's
+    # nesting, both short-circuits) over 11 001 indices spanning zero, plus the
+    # black-box probe that keeps the six Phase-6 goldens' `rngVersion: 0` honest —
+    # the same PROB-100 pattern under two different master seeds must render
+    # BYTE-IDENTICAL MIDI, which is only true because `p >= 100` short-circuits
+    # BEFORE hashing. Its complement (PROB 50 under those seeds must DIVERGE) is what
+    # stops the probe passing because the seed reaches nothing at all. Plus the
+    # determinism reading of "loop-stable": identical across re-renders, across all
+    # ten swept block sizes, and across a transport LOCATE into the middle of the
+    # render — the last of which is what fails if the roll is ever keyed on a
+    # transport counter instead of on the global step index.
+    step_probability.cpp
+    # ── Phase 7.2/7.3: the SUB-STEP half of L2 (ratchets, micro-timing, swing).
+    #
+    # step_ratchet: child count from the RATCHET lane, child onsets derived
+    # INDEPENDENTLY from the parent (`child / count`, never cumulative addition of a
+    # rounded slot — at seven children the slot is 822.857 samples and cumulative
+    # rounding drifts the last child), the velocity ramp's shape at several child
+    # counts, per-child probability's seed-exactness through `subStepHash` against a
+    # longhand reference, LEN measured against a child's OWN slot rather than the whole
+    # step, and the intra-step same-pitch chain with §5.5's 1-sample gaps.
+    step_ratchet.cpp
+    # step_microswing: swing pairing through `stepFloorMod` INCLUDING NEGATIVE INDICES
+    # (`%` would read step -1 as even and phase the whole negative timeline half a step
+    # out), `swingPct == 50` as a BITWISE no-op (which is what makes every pre-7.2
+    # golden provably unmoved by swing's arrival), the composed clamp saturating, and
+    # `|shiftSteps| <= maxSubStepShiftSteps` over an exhaustive lane sweep — the last of
+    # which is what a per-source clamp fails, and a per-source clamp admits ±1.0 and
+    # silently breaks the step walk's scan widening.
+    step_microswing.cpp
+    # substep_ownership: THE BACKSTOP FOR PHASE 7.2's NEW GEOMETRY, and the one file in
+    # the determinism suite whose primary guard is a LITERAL COUNT rather than a sweep.
+    # Ownership moved from a step-INDEX range to a per-event PPQ predicate (`ownsPpq`)
+    # plus a widened scan, which replaces a total function with a tiling argument — and
+    # a tiling that leaks drops (or duplicates) events IDENTICALLY AT EVERY BUFFER SIZE,
+    # so no cross-block-size comparison can see it. This file requires all 766
+    # `(index, child)` pairs at all ten swept sizes, and proves the widening's bounds
+    # (`stepScanBack == 2`, `stepScanForward == 1`) are ATTAINED on both sides — an
+    # unattained bound is untested padding.
+    substep_ownership.cpp
     # Issue #22/#24: SynthSlot message-thread coordinator unit tests. The coordinator
     # depends only on the GUI-free app/ISynthEngine.h seam (NOT AudioEngine), so
     # app/SynthSlot.cpp compiles into this GUI-free target linking arpbox_hosting only

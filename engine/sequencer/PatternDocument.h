@@ -162,6 +162,28 @@ public:
     bool setGrid (double stepPpq);
 
     // MESSAGE-THREAD ONLY:
+    /** Sets the project swing amount as a percentage, CLAMPED into [50, 75]
+        (§8.1 `transport.swingPct`). 50 is straight; 75 delays every odd global
+        step by a full half step.
+
+        PROJECT-LEVEL, mirroring `setGrid` exactly — no pattern index, for the
+        same reason (see the swing note in PatternTypes.h). CLAMPED rather than
+        rejected, unlike `setGrid`: unlike a grid, every finite swing value has a
+        sane nearest legal neighbour, and a macro or mod-matrix source (§5.3) will
+        eventually drive this continuously and must not fail on overshoot. A
+        non-finite value IS rejected — there is nothing to clamp a NaN to. */
+    bool setSwing (double swingPct);
+
+    // MESSAGE-THREAD ONLY:
+    /** Sets the project ratchet velocity ramp as a percentage applied to the LAST
+        ratchet child, CLAMPED into [-100, +100] (§5.1 L2 "per-ratchet velocity
+        ramp"). 0 — the default — is flat: every child carries its step's own VEL.
+
+        PROJECT-LEVEL, like `setSwing` and for the same reason (see the ramp note
+        in PatternTypes.h). Clamped, not rejected; a non-finite value IS rejected. */
+    bool setRatchetVelocityRamp (double rampPct);
+
+    // MESSAGE-THREAD ONLY:
     /** Replaces the L0 note pool view (§5.1). Phase 6 uses this for the stub pool
         and for tests; Phase 8's live THRU/SELF pool publishes through the same
         door. A `size` above `maxPoolSize` is clamped. */

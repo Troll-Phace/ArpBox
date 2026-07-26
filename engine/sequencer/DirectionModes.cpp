@@ -3,44 +3,40 @@
 // EngineGuiGuard.h is pulled in FIRST by DirectionModes.h (before any JUCE
 // include), which is where the tripwire needs to sit; repeating it here would be
 // a no-op. Same convention as graph/MasterProcessor.cpp.
+#include "../generative/Rng.h"
 #include "PatternTypes.h"
 
 #include <juce_core/juce_core.h>
 
 #include <cstdint>
 
+// ─────────────────────────────────────────────────────────────────────────────
+// THE PHASE-12 NOTE THAT USED TO LIVE HERE HAS BEEN DISCHARGED (Phase 7.1).
+//
+// This file used to carry a local `splitmix64` plus two salt literals
+// (`walkSalt = 0x5741`, `randomSalt = 0x9E37`) in the anonymous namespace above,
+// with a note reading "when the seed engine publishes a shared `splitmix64`,
+// DELETE this local copy and call that one". Phase 7.1 published it, so all
+// three are gone and the two stochastic modes below now call
+// `engine/generative/Rng.h` — the single owner of the primitive and of the
+// append-only `RngDomain` registry the salts moved into.
+//
+// THE MIGRATION IS BIT-IDENTICAL BY CONSTRUCTION, NOT BY MEASUREMENT: the shared
+// function body is the old one character-for-character, and the two salts were
+// recorded in the registry AT THEIR EXISTING LITERALS. The XOR expression shapes
+// at the three call sites below are likewise unchanged. `tests/rng_primitive.cpp`
+// pins the exact outputs of those three expressions so a future edit to either
+// side cannot quietly move a `walk` or `randomNoRepeat` table.
+//
+// It is worth knowing WHY that mattered enough to be careful: these two modes
+// were deliberately given no golden files (tests/determinism_goldens.cpp:41-55),
+// so a drift here would have been invisible to the golden suite.
+// ─────────────────────────────────────────────────────────────────────────────
+
 namespace arpbox::engine::direction
 {
 namespace
 {
-    /** splitmix64 used as a PURE HASH (not as a stateful generator): one call in,
-        one well-mixed 64-bit word out, no state carried between calls.
-
-        ARCHITECTURE §5.2 already names splitmix64 as the seed-mixing primitive
-        ("Effective stream seed = splitmix64 (masterSeed ⊕ operatorSeed ⊕ …)"), so
-        this is not an invented RNG — the constants below are the canonical ones
-        (Steele/Lea/Flood), which is what makes the swap safe when Phase 12's seed
-        engine lands its own copy.
-
-        PHASE 12 NOTE: when the seed engine publishes a shared `splitmix64`, DELETE
-        this local copy and call that one. The constants must stay bit-identical or
-        every `walk` / `randomNoRepeat` golden regenerates — a determinism-contract
-        break requiring an `rngVersion` bump (§5.2), not a refactor. */
-    constexpr std::uint64_t splitmix64 (std::uint64_t x) noexcept
-    {
-        x += 0x9E3779B97F4A7C15ULL;
-        std::uint64_t z = x;
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        return z ^ (z >> 31);
-    }
-
-    /** Domain-separation constants for the two stochastic modes. Distinct values keep
-        a `walk` table and a `randomNoRepeat` table built from the SAME masterSeed from
-        being correlated. Frozen by Phase 6.4 goldens. */
-    constexpr std::uint64_t walkSalt = 0x5741ULL;
-    constexpr std::uint64_t randomSalt = 0x9E37ULL;
-
     /** `converge`'s order (§12.3, OUTSIDE → MIDDLE): 0, n-1, 1, n-2, 2, … For n = 4
         that is 0,3,1,2. Every other symmetric mode is expressed in terms of this one
         so the three of them cannot drift apart. */
@@ -216,7 +212,9 @@ int buildTraversal (DirectionMode mode, int poolSize, std::uint64_t seed, std::u
 
         for (int k = 1; k < period; ++k)
         {
-            const bool stepUp = (splitmix64 (seed ^ walkSalt ^ static_cast<std::uint64_t> (k)) & 1ULL) != 0ULL;
+            const bool stepUp = (rng::splitmix64 (seed ^ rng::domainSalt (rng::RngDomain::directionWalk) ^
+                                                  static_cast<std::uint64_t> (k)) &
+                                 1ULL) != 0ULL;
 
             int next = stepUp ? cur + 1 : cur - 1;
 
@@ -237,7 +235,9 @@ int buildTraversal (DirectionMode mode, int poolSize, std::uint64_t seed, std::u
         // Uniform draw excluding the previous entry. Modulo bias is nil for a
         // power-of-two n and below 2^-58 otherwise, which is far under any
         // audible or testable threshold.
-        out[0] = static_cast<std::uint8_t> (splitmix64 (seed ^ randomSalt) % static_cast<std::uint64_t> (n));
+        out[0] = static_cast<std::uint8_t> (
+            rng::splitmix64 (seed ^ rng::domainSalt (rng::RngDomain::directionRandomNoRepeat)) %
+            static_cast<std::uint64_t> (n));
 
         for (int k = 1; k < period; ++k)
         {
@@ -249,8 +249,9 @@ int buildTraversal (DirectionMode mode, int poolSize, std::uint64_t seed, std::u
 
             for (int attempt = 0; attempt < maxRejectionAttempts; ++attempt)
             {
-                const std::uint64_t hash = splitmix64 (seed ^ randomSalt ^ static_cast<std::uint64_t> (k) ^
-                                                       (static_cast<std::uint64_t> (attempt) << 32));
+                const std::uint64_t hash =
+                    rng::splitmix64 (seed ^ rng::domainSalt (rng::RngDomain::directionRandomNoRepeat) ^
+                                     static_cast<std::uint64_t> (k) ^ (static_cast<std::uint64_t> (attempt) << 32));
                 const int candidate = static_cast<int> (hash % static_cast<std::uint64_t> (n));
 
                 if (candidate == prev)

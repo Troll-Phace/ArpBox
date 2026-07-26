@@ -16,6 +16,26 @@ namespace
 } // namespace
 
 // RT-SAFE:
+std::int64_t SoundingNoteTable::placementSampleFor (const Entry& entry,
+                                                    std::int64_t capSample,
+                                                    std::int64_t blockStartSample,
+                                                    int numSamples) noexcept
+{
+    // THE PLACEMENT RULE, in one place (see the header for the full argument).
+    const std::int64_t blockEndSample = blockStartSample + static_cast<std::int64_t> (juce::jmax (0, numSamples));
+
+    // THE FLOOR. An on sample outside this block is on a timeline this block cannot
+    // compare against (a locate breaks it), so the block head stands in — which is a
+    // no-op for every entry that started earlier on the SAME timeline.
+    const bool onSampleIsComparable = entry.onSample >= blockStartSample && entry.onSample < blockEndSample;
+    const std::int64_t floorSample = onSampleIsComparable ? entry.onSample : blockStartSample;
+
+    // The cap can only SHORTEN (jmin against the entry's own schedule) and can never
+    // reach below the floor (jmax).
+    return juce::jmin (entry.dueOffSample, juce::jmax (floorSample, capSample));
+}
+
+// RT-SAFE:
 int SoundingNoteTable::offsetForSample (std::int64_t absoluteSample,
                                         std::int64_t blockStartSample,
                                         int numSamples) noexcept
@@ -51,11 +71,19 @@ void SoundingNoteTable::removeAt (int index) noexcept
     // carved into blocks. Shifting the tail down instead makes storage order equal
     // REGISTRATION ORDER unconditionally, which is a property of the music alone.
     //
-    // Cost: one contiguous move of at most `capacity - 1` trivially-copyable 16-byte
-    // entries (< 4 KB, realistically ~1 KB — see the capacity discussion). No
-    // allocation, no branching per element, and removals are rare relative to blocks.
-    // The alternative — sorting at every emission point — leaves the root cause in
-    // place for the next emission path to rediscover.
+    // Cost: one contiguous move of at most `capacity - 1` trivially-copyable 24-byte
+    // entries (< 6 KB; see the capacity discussion, which since Phase 7.2 puts the
+    // realistic live count in the low tens rather than at 1 per pitch). No allocation,
+    // no branching per element, and removals are rare relative to blocks. The
+    // alternative — sorting at every emission point — leaves the root cause in place
+    // for the next emission path to rediscover.
+    //
+    // THE FIGURES ARE 24 / 6 KB, NOT 16 / 4 KB: `Entry` grew an `onSample` field in
+    // Phase 7.2 (THE PLACEMENT RULE's floor), taking it from 16 to 24 bytes and the
+    // whole table from 4104 to 6152 bytes. The old numbers survived here after the
+    // header's own `Entry` doc had been corrected, which is the shape issue #80 is
+    // about: a retracted figure left behind in the one place a future reader would
+    // consult before touching this loop.
     //
     // The `+ 1` is done in the WIDE type (`std::size_t (i) + 1`), never in `int`
     // then widened: widening after the add is the shape that can overflow before the
@@ -86,6 +114,38 @@ int SoundingNoteTable::find (int channel, int note) const noexcept
 }
 
 // RT-SAFE:
+int SoundingNoteTable::findStartedAtOrBefore (int channel, int note, std::int64_t sample) const noexcept
+{
+    const auto ch = static_cast<std::uint8_t> (channel);
+    const auto n = static_cast<std::uint8_t> (note);
+
+    int best = -1;
+    std::int64_t bestOnSample = 0;
+
+    // FULL scan, not an early exit on the first match: storage order is REGISTRATION
+    // order (THE ORDERING RULE) and registration order is the caller's emission
+    // order, which since Phase 7.2 is index order rather than sample order. So the
+    // first qualifying entry is not necessarily the latest-starting one, and the
+    // latest-starting one is the note this pitch is actually taking over from. Same
+    // O(size()) cost as `find`; no allocation.
+    for (int i = 0; i < count; ++i)
+    {
+        const Entry& e = entries[static_cast<std::size_t> (i)];
+
+        if (e.channel != ch || e.note != n || e.onSample > sample)
+            continue;
+
+        if (best < 0 || e.onSample >= bestOnSample)
+        {
+            best = i;
+            bestOnSample = e.onSample;
+        }
+    }
+
+    return best;
+}
+
+// RT-SAFE:
 bool SoundingNoteTable::isDueAtOrBefore (int index, std::int64_t sample) const noexcept
 {
     if (index < 0 || index >= count)
@@ -100,13 +160,20 @@ int SoundingNoteTable::dueOffsetWithinBlock (int index, std::int64_t blockStartS
     if (index < 0 || index >= count || numSamples <= 0)
         return -1;
 
-    // A range-checked view of the shared conversion — see the header on why this is
-    // an observation accessor rather than the way a caller places a note-off.
-    return offsetForSample (entries[static_cast<std::size_t> (index)].dueOffSample, blockStartSample, numSamples);
+    // A range-checked view of the shared placement + conversion — see the header on
+    // why this is an observation accessor rather than the way a caller places a
+    // note-off. Routed through `placementSampleFor` with the entry's OWN due sample as
+    // the cap, exactly as `emitDueNoteOffs` does, so the anti-drift guard in the unit
+    // suite compares like with like.
+    const Entry& entry = entries[static_cast<std::size_t> (index)];
+
+    return offsetForSample (placementSampleFor (entry, entry.dueOffSample, blockStartSample, numSamples),
+                            blockStartSample,
+                            numSamples);
 }
 
 // RT-SAFE:
-bool SoundingNoteTable::add (int channel, int note, std::int64_t dueOffSample) noexcept
+bool SoundingNoteTable::add (int channel, int note, std::int64_t onSample, std::int64_t dueOffSample) noexcept
 {
     if (count >= capacity)
     {
@@ -118,6 +185,7 @@ bool SoundingNoteTable::add (int channel, int note, std::int64_t dueOffSample) n
 
     Entry& e = entries[static_cast<std::size_t> (count)];
     e.dueOffSample = dueOffSample;
+    e.onSample = onSample;
     e.channel = static_cast<std::uint8_t> (juce::jlimit (1, 16, channel));
     e.note = static_cast<std::uint8_t> (juce::jlimit (0, 127, note));
     ++count;
@@ -137,11 +205,15 @@ void SoundingNoteTable::retireNoLaterThan (int index,
 
     const Entry& entry = entries[static_cast<std::size_t> (index)];
 
-    // THE PLACEMENT RULE (header): the cap can only pull the off EARLIER. An entry
-    // whose off was already owed keeps its own scheduled sample no matter what the
-    // caller asks for, which is what makes the placement independent of which block
-    // happens to contain the caller's event.
-    const std::int64_t at = juce::jmin (entry.dueOffSample, capSample);
+    // THE PLACEMENT RULE, through its ONE implementation: the cap can only pull the
+    // off EARLIER, and never earlier than the note's own on. An entry whose off was
+    // already owed keeps its own scheduled sample no matter what the caller asks for,
+    // which is what makes the placement independent of which block happens to contain
+    // the caller's event; the FLOOR is the Phase 7.2 half, and it BINDS — a step
+    // displaced by swing or MICRO can be emitted after a same-pitch note that starts
+    // LATER than it (index order stopped being sample order), and without it that
+    // entry's off would land before its own note-on and hang the note at the synth.
+    const std::int64_t at = placementSampleFor (entry, capSample, blockStartSample, numSamples);
 
     emitNoteOff (midi, entry, offsetForSample (at, blockStartSample, numSamples));
     removeAt (index);
@@ -183,7 +255,11 @@ void SoundingNoteTable::emitDueNoteOffs (juce::MidiBuffer& midi, std::int64_t bl
         // every other emission path in this class makes, so an off emitted here and
         // an off emitted there for the same due sample land on the same offset,
         // always.
-        emitNoteOff (midi, e, offsetForSample (e.dueOffSample, blockStartSample, numSamples));
+        emitNoteOff (midi,
+                     e,
+                     offsetForSample (placementSampleFor (e, e.dueOffSample, blockStartSample, numSamples),
+                                      blockStartSample,
+                                      numSamples));
         removeAt (i); // shifts the next entry INTO `i` — deliberately not advanced
     }
 }
@@ -227,11 +303,36 @@ void SoundingNoteTable::flush (juce::MidiBuffer& midi,
 
         if (alreadyEnded)
         {
-            emitNoteOff (midi, e, offsetForSample (e.dueOffSample, blockStartSample, numSamples));
+            emitNoteOff (midi,
+                         e,
+                         offsetForSample (placementSampleFor (e, e.dueOffSample, blockStartSample, numSamples),
+                                          blockStartSample,
+                                          numSamples));
             continue;
         }
 
-        emitNoteOff (midi, e, cutOffset);
+        // CUT SHORT — but never before its own note-on, which is the Phase 7.2 half
+        // of THE PLACEMENT RULE and binds here for the same reason it binds in
+        // `retireNoLaterThan`: a positively displaced step (swing, MICRO) or a late
+        // ratchet child can be registered with an on sample AFTER the point this
+        // discontinuity releases from, and forcing it onto `releaseFromSample - 1`
+        // would emit its off before its on.
+        //
+        // THROUGH `placementSampleFor`, NOT A LOCAL `jmax`, and that is not tidiness:
+        // this branch also handles entries ORPHANED BY A LOCATE, whose on samples are
+        // on a timeline `blockStartSample` no longer belongs to. Only that function
+        // knows to disregard an incomparable on sample; a local `jmax (e.onSample,
+        // releaseFromSample - 1)` here moved the terminating stop-flush off of
+        // `sequencer_retrigger`'s tied sweep from 122880 to 123007 and reddened a
+        // golden. See the header note on the function.
+        //
+        // `cutOffset` is still used verbatim for the CC123 sweep below, which
+        // describes the DISCONTINUITY rather than any one note.
+        emitNoteOff (midi,
+                     e,
+                     offsetForSample (placementSampleFor (e, releaseFromSample - 1, blockStartSample, numSamples),
+                                      blockStartSample,
+                                      numSamples));
 
         if (e.channel >= 1 && e.channel <= 16)
             sweepChannels =
