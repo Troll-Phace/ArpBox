@@ -23,7 +23,15 @@ paths:
 ## Real-Time Safety (hard rules — audio thread / processBlock call tree)
 - NO allocation (`new`, `malloc`, container growth, `String` construction)
 - NO locks (`std::mutex`, `CriticalSection`), NO file/network I/O, NO logging
-- NO `rand()`/`std::mt19937` construction — use the preallocated `RngStream` (xoshiro256++)
+- NO `rand()`/`std::mt19937` construction. Randomness inside the **pure emission core**
+  (`evaluateStep` and everything it calls) is drawn as a **per-index hash** —
+  `rng::stepHash (masterSeed, domain, stepIndex)` / `rng::subStepHash (…, childIndex)` from
+  `engine/generative/Rng.h` — **never** from a running stream. A stream is only pure if it is
+  drawn from a FIXED number of times, and PRE chains and variable ratchet counts both break
+  that; a cursor there is an issue-#53 violation no matter where it is parked (a file-scope
+  `static` included). `RngStream` (xoshiro256++), when Phase 12 introduces it, is for the
+  **operator stack** (§5.1 L3): stack-local, seeded per (step, operator), never persistent
+  across steps. It is not "preallocated" and there is no long-lived RNG object on the audio thread.
 - Cross-thread data moves ONLY via `juce::AbstractFifo` command/event queues or atomic
   pointer swaps of immutable `PatternSnapshot`/`EngineSnapshot` objects
 - Retired snapshots are returned to the message thread for deletion — never freed on the audio thread

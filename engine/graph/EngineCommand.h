@@ -35,6 +35,17 @@ enum class EngineCommandType : std::uint8_t
     setTempoBpm,     ///< value.d = target tempo in BPM (clamped to 20..300).
     // ── Phase 6.1 sequencer (consumed by `SequencerProcessor`, an ICommandSink) ─
     queuePatternSwitch, ///< targetId = pattern index 0..15; value.u = QuantizeMode.
+    // ── Phase 7.1 step logic (consumed by `SequencerProcessor`, an ICommandSink) ─
+    /** FILL flag (pad 16 held), §12.2 — consumed by SequencerProcessor.
+        `value.i` = 0 (released) / 1 (held); any non-zero reads as held.
+
+        Deliberately a COMMAND rather than snapshot state: FILL gates the
+        `FILL`/`!FILL` trig conditions and is a momentary live-performance flag
+        that changes on both press AND release, so carrying it on
+        `PatternSnapshot` would rebuild and republish the whole document twice
+        per pad tap. Master and Transport ignore it via their `default:` arms
+        (ICommandSink.h fan-out contract). */
+    setFillHeld,
     // Later phases: seed/DICE, commit/uncommit — appended as new enumerators above
     // this line.
 };

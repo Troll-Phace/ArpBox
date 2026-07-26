@@ -690,9 +690,9 @@ TEST_CASE ("midi/sounding-table: find locates a sounding pitch per channel", "[u
     REQUIRE (table.isEmpty ());
     REQUIRE (table.find (1, 60) == -1);
 
-    REQUIRE (table.add (1, 60, 1000));
-    REQUIRE (table.add (1, 64, 2000));
-    REQUIRE (table.add (5, 60, 3000));
+    REQUIRE (table.add (1, 60, 0, 1000));
+    REQUIRE (table.add (1, 64, 0, 2000));
+    REQUIRE (table.add (5, 60, 0, 3000));
 
     REQUIRE (table.size () == 3);
     REQUIRE (table.find (1, 60) >= 0);
@@ -736,19 +736,19 @@ TEST_CASE ("midi/sounding-table: overflow drops the note-on and never a note-off
     {
         const int channel = 1 + (i / 128); // channels 1 and 2, notes 0..127 each
         const int note = i % 128;
-        REQUIRE (table.add (channel, note, 1000 + i));
+        REQUIRE (table.add (channel, note, 0, 1000 + i));
     }
 
     REQUIRE (table.size () == SoundingNoteTable::capacity);
     REQUIRE (table.droppedNoteOnCount () == 0);
 
     // One past capacity: refused, counted, and NOT registered.
-    REQUIRE (table.add (3, 60, 5000) == false);
+    REQUIRE (table.add (3, 60, 0, 5000) == false);
     REQUIRE (table.droppedNoteOnCount () == 1);
     REQUIRE (table.size () == SoundingNoteTable::capacity);
     REQUIRE (table.find (3, 60) == -1);
 
-    REQUIRE (table.add (4, 61, 5000) == false);
+    REQUIRE (table.add (4, 61, 0, 5000) == false);
     REQUIRE (table.droppedNoteOnCount () == 2);
 
     // Every held note is released — a full table is exactly when a dropped note-off
@@ -759,7 +759,7 @@ TEST_CASE ("midi/sounding-table: overflow drops the note-on and never a note-off
     REQUIRE (table.isEmpty ());
 
     // Capacity is available again afterwards.
-    REQUIRE (table.add (3, 60, 6000));
+    REQUIRE (table.add (3, 60, 0, 6000));
 }
 
 TEST_CASE ("midi/sounding-table: the due window is half-open on the exact sample timeline", "[unit]")
@@ -770,7 +770,7 @@ TEST_CASE ("midi/sounding-table: the due window is half-open on the exact sample
     SoundingNoteTable table;
     juce::MidiBuffer midi;
 
-    REQUIRE (table.add (1, 60, 1000)); // due exactly at the end of block [0, 1000)
+    REQUIRE (table.add (1, 60, 0, 1000)); // due exactly at the end of block [0, 1000)
     table.emitDueNoteOffs (midi, 0, 1000);
     REQUIRE (midi.isEmpty ());
     REQUIRE (table.size () == 1);
@@ -786,7 +786,7 @@ TEST_CASE ("midi/sounding-table: the due window is half-open on the exact sample
 
     // An interior due sample lands at its exact offset.
     midi.clear ();
-    REQUIRE (table.add (1, 62, 1050));
+    REQUIRE (table.add (1, 62, 0, 1050));
     table.emitDueNoteOffs (midi, 1000, 128);
     REQUIRE (countIf (midi, isNoteOffMessage) == 1);
     {
@@ -798,7 +798,7 @@ TEST_CASE ("midi/sounding-table: the due window is half-open on the exact sample
     // emitted at offset 0 rather than dropped: a late note-off is a blemish, a missing
     // one is a hung note.
     midi.clear ();
-    REQUIRE (table.add (1, 64, 10));
+    REQUIRE (table.add (1, 64, 0, 10));
     table.emitDueNoteOffs (midi, 5000, 128);
     REQUIRE (countIf (midi, isNoteOffMessage) == 1);
     REQUIRE (table.isEmpty ());
@@ -809,15 +809,15 @@ TEST_CASE ("midi/sounding-table: the due window is half-open on the exact sample
 
     // Several notes due in one block are all released.
     midi.clear ();
-    REQUIRE (table.add (1, 60, 100));
-    REQUIRE (table.add (1, 62, 101));
-    REQUIRE (table.add (1, 64, 102));
+    REQUIRE (table.add (1, 60, 0, 100));
+    REQUIRE (table.add (1, 62, 0, 101));
+    REQUIRE (table.add (1, 64, 0, 102));
     table.emitDueNoteOffs (midi, 0, 128);
     REQUIRE (countIf (midi, isNoteOffMessage) == 3);
     REQUIRE (table.isEmpty ());
 
     // A zero-length block releases nothing (and must not read past the buffer).
-    REQUIRE (table.add (1, 60, 0));
+    REQUIRE (table.add (1, 60, 0, 0));
     table.emitDueNoteOffs (midi, 0, 0);
     REQUIRE (table.size () == 1);
 }
@@ -879,12 +879,12 @@ TEST_CASE ("midi/sounding-table: dueOffsetWithinBlock agrees with emitDueNoteOff
                             << ", due " << testCase.due);
 
         SoundingNoteTable query;
-        REQUIRE (query.add (1, 60, testCase.due));
+        REQUIRE (query.add (1, 60, 0, testCase.due));
         REQUIRE (query.dueOffsetWithinBlock (0, testCase.blockStart, testCase.numSamples) == testCase.expected);
 
         SoundingNoteTable emitter;
         juce::MidiBuffer emitted;
-        REQUIRE (emitter.add (1, 60, testCase.due));
+        REQUIRE (emitter.add (1, 60, 0, testCase.due));
         emitter.emitDueNoteOffs (emitted, testCase.blockStart, testCase.numSamples);
 
         const bool dueInsideBlock =
@@ -912,7 +912,7 @@ TEST_CASE ("midi/sounding-table: dueOffsetWithinBlock agrees with emitDueNoteOff
         // Empty table: index 0 is out of range even though it is a legal-looking index.
         REQUIRE (table.dueOffsetWithinBlock (0, 0, 128) == -1);
 
-        REQUIRE (table.add (1, 60, 64));
+        REQUIRE (table.add (1, 60, 0, 64));
         REQUIRE (table.dueOffsetWithinBlock (-1, 0, 128) == -1);
         REQUIRE (table.dueOffsetWithinBlock (1, 0, 128) == -1); // one past the live count
         REQUIRE (table.dueOffsetWithinBlock (99, 0, 128) == -1);
@@ -937,7 +937,7 @@ TEST_CASE ("midi/sounding-table: dueOffsetWithinBlock agrees with emitDueNoteOff
         // note may be shortened. The boundary is inclusive: due == the note-on's sample
         // means the off was already owed.
         SoundingNoteTable table;
-        REQUIRE (table.add (1, 60, 1000));
+        REQUIRE (table.add (1, 60, 0, 1000));
 
         REQUIRE (table.isDueAtOrBefore (0, 1000)); // exactly at — ALREADY owed
         REQUIRE (table.isDueAtOrBefore (0, 1001));
@@ -980,12 +980,12 @@ TEST_CASE ("midi/sounding-table: dueOffsetWithinBlock agrees with emitDueNoteOff
                 const std::int64_t due = blockStart + delta;
 
                 SoundingNoteTable query;
-                query.add (1, 60, due);
+                query.add (1, 60, 0, due);
                 const int expected = query.dueOffsetWithinBlock (0, blockStart, numSamples);
 
                 SoundingNoteTable emitter;
                 juce::MidiBuffer emitted;
-                emitter.add (1, 60, due);
+                emitter.add (1, 60, 0, due);
                 emitter.emitDueNoteOffs (emitted, blockStart, numSamples);
 
                 const bool dueInsideBlock = due < blockStart + static_cast<std::int64_t> (numSamples);
@@ -1064,7 +1064,7 @@ TEST_CASE ("midi/sounding-table: the same-pitch retrigger policy emits off-then-
         SoundingNoteTable table;
         juce::MidiBuffer midi;
 
-        REQUIRE (table.add (1, 60, 5000)); // note 60 already sounding
+        REQUIRE (table.add (1, 60, 0, 5000)); // note 60 already sounding
 
         constexpr int offset = 64;
         constexpr std::int64_t blockStart = 0;
@@ -1106,7 +1106,12 @@ TEST_CASE ("midi/sounding-table: the same-pitch retrigger policy emits off-then-
         SoundingNoteTable table;
         juce::MidiBuffer midi;
 
-        REQUIRE (table.add (1, 60, 5000));
+        // ON SAMPLE -50: the note started in the PREVIOUS block, which is what makes
+        // this section still exercise the CONVERSION'S LOWER CLAMP after Phase 7.2
+        // added the `jmax (entry.onSample, cap)` floor to THE PLACEMENT RULE. With an
+        // on sample of 0 the floor would swallow the negative cap first and the clamp
+        // under test would never be reached.
+        REQUIRE (table.add (1, 60, -50, 5000));
         const int existing = table.find (1, 60);
         REQUIRE (existing >= 0);
         // `onSample - 1` is the LAST SAMPLE OF THE PREVIOUS BLOCK, which this render
@@ -1140,9 +1145,9 @@ TEST_CASE ("midi/sounding-table: flush sweeps CC123 only on channels it sounded 
     SoundingNoteTable table;
     juce::MidiBuffer midi;
 
-    REQUIRE (table.add (1, 60, 1000));
-    REQUIRE (table.add (5, 72, 1000));
-    REQUIRE (table.add (5, 79, 1000));
+    REQUIRE (table.add (1, 60, 0, 1000));
+    REQUIRE (table.add (5, 72, 0, 1000));
+    REQUIRE (table.add (5, 79, 0, 1000));
 
     // Release from absolute 9 in the block [0, 128): every entry is still sounding
     // (due 1000), so all three are cut short at `releaseFrom - 1` = offset 8.
@@ -1183,7 +1188,7 @@ TEST_CASE ("midi/sounding-table: flush sweeps CC123 only on channels it sounded 
     // `reset()` is the teardown path: forgets everything and emits nothing.
     juce::MidiBuffer silent;
     SoundingNoteTable discarded;
-    REQUIRE (discarded.add (1, 60, 1000));
+    REQUIRE (discarded.add (1, 60, 0, 1000));
     discarded.reset ();
     REQUIRE (discarded.isEmpty ());
     REQUIRE (silent.isEmpty ());

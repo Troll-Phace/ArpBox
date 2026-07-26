@@ -78,9 +78,12 @@
 #include "support/NoteLifecycleCheck.h"
 #include "support/SequencerRenderRig.h"
 
+#include "engine/generative/Rng.h"
 #include "engine/graph/EngineCommand.h"
+#include "engine/midi/NotePool.h"
 #include "engine/sequencer/PatternDocument.h"
 #include "engine/sequencer/PatternTypes.h"
+#include "engine/sequencer/StepLogic.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -109,6 +112,8 @@ using arpbox::testing::renderSequencer;
 using arpbox::testing::ScheduledCommand;
 using arpbox::testing::SequencerRig;
 using arpbox::testing::TimedMidiEvent;
+
+using arpbox::engine::TrigCondition;
 
 namespace
 {
@@ -617,16 +622,482 @@ std::vector<ScheduledCommand> euclidSchedule ()
     return schedule;
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// PHASE 7 — THE SIX STEP-LOGIC GOLDENS (rngVersion 1)
+//
+// ── WHY THEY ARE STAMPED `rngVersion: 1` EVEN WHEN NO HASH IS EVALUATED ─────
+// `rngVersion` describes the SCHEMA's RNG algorithm, not whether a particular
+// pattern happened to consume randomness. `cond-a-b-8loops`, `ratchet-ramp-8`,
+// `micro-swing-compose` and `ratchet-swing-retrigger` all sit at the PROB lane's
+// default 100, so `probabilityPasses` returns through its `>= 100` short-circuit
+// and not one `splitmix64` round runs — that short-circuit is a documented CONTRACT
+// in StepLogic.cpp precisely so this is provable rather than probable. They are
+// still Phase-7 patterns and a Phase-7 loader reads them as rngVersion 1.
+//
+// The six PHASE-6 goldens above keep `rngVersion: 0`, and that is the whole reason
+// the blanket `REQUIRE (rngVersion == 0)` in the inventory case had to become the
+// per-scenario table below: leaving it blanket forces either a lie (stamping the new
+// files 0) or a spurious failure.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── A SMALLER ALIGNED SPAN FOR THE RATCHET-8 FRACTIONAL FILE ────────────────
+// `ratchet-swing-retrigger` puts EIGHT notes on every step. At `fractionalMusic`
+// (614400 samples = 127.25 steps) that is 1024 note-ons and a ~2050-line golden —
+// and Rule zero rests on a golden being AUDITABLE BY EYE ("a golden nobody can read
+// by eye is a golden nobody will ever audit"). Two alignment units carry 25 steps,
+// which is enough for the swing pairing to alternate a dozen times and for the
+// retrigger cap to bind two hundred times, in ~420 lines. Still an exact multiple of
+// `goldenAlignmentUnit`, so the sweep's precondition holds unchanged.
+constexpr std::int64_t ratchetFractionalMusic = 2 * goldenAlignmentUnit;                     ///< 122880
+constexpr std::int64_t ratchetFractionalSpan = ratchetFractionalMusic + goldenAlignmentUnit; ///< 184320
+
+/** Writes `value` into every one of pattern `index`'s storage slots for `lane`. */
+void fillLane (PatternDocument& document, int index, LaneId lane, int value)
+{
+    for (int step = 0; step < maxSteps; ++step)
+        document.setLaneValue (index, lane, step, value);
+}
+
+/** A velocity that NAMES ITS STEP: `100 + step`, written into a 16-long VEL lane, so
+    every note in the file says which of the sixteen phases produced it as a BYTE
+    rather than as an inference from timing. Used by both COND goldens, where the
+    whole question is WHICH steps fired. */
+void velocityNamesTheStep (PatternDocument& document, int index)
+{
+    document.setLaneLength (index, LaneId::vel, 16);
+
+    for (int step = 0; step < 16; ++step)
+        document.setLaneValue (index, LaneId::vel, step, 100 + step);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. cond-a-b-8loops — THE §12.2 ACCEPTANCE-CRITERION GOLDEN
+// ─────────────────────────────────────────────────────────────────────────────
+// INSTRUCTIONS Phase 7's criterion is "3:4 fires exactly on loop 3 of every 4
+// (golden-verified)", and this is that golden. Eight loops of sixteen steps = eight
+// bars, so a `1:8` has room to fire exactly once and a `3:4` exactly twice.
+//
+// THE GATE LANE FIRES ON ONLY FOUR OF THE SIXTEEN STEPS, one per conditioned phase.
+// That is not economy — it is what makes the file READABLE: every event in it is a
+// conditioned step, so a reader is never asked to separate "this step passed its
+// condition" from "this step had no condition". The unconditioned steps would
+// otherwise be 87 % of the file.
+//
+// D5 IS WHAT IS BEING FROZEN. "A loop" is the GATE LANE'S CYCLE (`gatePeriodSteps`),
+// which here is the 16-step lane length, so loop index == bar index and a reviewer
+// divides an absolute sample by 92160 to get the loop. The four conditions were
+// chosen so that between them they pin every part of the decode:
+//
+//   step  0  `3:4`   ⇒ floorMod (loop, 4) == 2  ⇒ loops 2 and 6      — TWO note-ons
+//   step  4  `1:2`   ⇒ floorMod (loop, 2) == 0  ⇒ loops 0, 2, 4, 6
+//   step  8  `2:2`   ⇒ floorMod (loop, 2) == 1  ⇒ loops 1, 3, 5, 7
+//   step 12  `1:8`   ⇒ floorMod (loop, 8) == 0  ⇒ loop 0 only        — ONE note-on
+//
+// `1:2` and `2:2` are complementary by construction, so together they must account
+// for exactly one note per loop — an internal consistency check the case asserts.
+// And `a - 1`: §12.2 numbers loops from 1 while `loopIndexAt` numbers them from 0, so
+// `3:4` fires on loop INDEX 2. Dropping the `- 1` would fire it one loop late,
+// forever, and this file is what makes that a red test rather than a shipped bug.
+//
+// THE SUPPRESSED STEPS STILL CONSUME THEIR GATED ORDINAL (the "PHASE 7, READ THIS
+// BEFORE YOU 'FIX' IT" rule on `gatedOrdinal`), which is directly visible here: the
+// pitch of step 0's note in loop 2 is pool[8 % 8] = pool[0], i.e. the ordinal counted
+// all four gated steps of loops 0 and 1 even though six of those eight were
+// suppressed by their conditions.
+
+void configureConditionCycle (PatternDocument& document)
+{
+    document.beginTransaction ();
+
+    // Four gated phases out of sixteen — one per condition under test.
+    fillLane (document, 0, LaneId::gate, 0);
+    document.setLaneValue (0, LaneId::gate, 0, 1);
+    document.setLaneValue (0, LaneId::gate, 4, 1);
+    document.setLaneValue (0, LaneId::gate, 8, 1);
+    document.setLaneValue (0, LaneId::gate, 12, 1);
+
+    document.setLaneLength (0, LaneId::cond, 16);
+    document.setLaneValue (0, LaneId::cond, 0, static_cast<int> (TrigCondition::ab3of4));
+    document.setLaneValue (0, LaneId::cond, 4, static_cast<int> (TrigCondition::ab1of2));
+    document.setLaneValue (0, LaneId::cond, 8, static_cast<int> (TrigCondition::ab2of2));
+    document.setLaneValue (0, LaneId::cond, 12, static_cast<int> (TrigCondition::ab1of8));
+
+    velocityNamesTheStep (document, 0);
+
+    document.endTransaction ();
+}
+
+void configureConditionCyclePerturbed (PatternDocument& document)
+{
+    configureConditionCycle (document);
+    // `3:4` becomes `4:4` — ONE ordinal, and the two note-ons move from loops 2 and 6
+    // to loops 3 and 7. This is the perturbation that a decode off by one would make
+    // indistinguishable from the reference, so it is the right negative control.
+    document.setLaneValue (0, LaneId::cond, 0, static_cast<int> (TrigCondition::ab4of4));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. cond-pre-chain — D6's PRE CHAIN, FROZEN ON THE DEPTH-8 BOUNDARY
+// ─────────────────────────────────────────────────────────────────────────────
+// A run of TEN consecutive `PRE` steps behind ONE anchor. That length is chosen to
+// straddle `maxPreChainDepth` exactly, so the file freezes BOTH sides of D6's
+// truncation rule instead of only the working side:
+//
+//   steps 1..8   the backward walk reaches the anchor within the budget (step k needs
+//                k pushes, and the budget check trips when the depth already stands at
+//                8) ⇒ these steps inherit the anchor's result
+//   steps 9, 10  the budget is exhausted BEFORE the anchor is reached ⇒ D6's base case
+//                `false` ⇒ THESE STEPS ARE SILENT, FOREVER, WHATEVER THE ANCHOR DID
+//
+// VELOCITY NAMES THE STEP, which turns that second row into the strongest assertion
+// in this file: the bytes 0x6D (109) and 0x6E (110) must appear NOWHERE in the
+// golden. A future edit that made the truncation base case `true`, or that raised the
+// budget, would add them. `!= false` is not observable from a stream; a missing byte
+// is.
+//
+// ── AND THE ANCHOR'S PROBABILITY COUNTS ─────────────────────────────────────
+// The anchor (step 0) sits at PROB 50 with a fixed `masterSeed`, and every link is at
+// PROB 100. So the anchor's roll alone decides whether steps 0..8 sound, and because
+// the roll is keyed on the GLOBAL step index the answer differs from loop to loop —
+// which is what makes the semantic VISIBLE rather than merely implemented. Seeding
+// the anchor from its condition alone (ignoring its probability) would make every
+// loop fire, and the case below asserts out loud that the file contains both a loop
+// where the chain sounded and a loop where it did not.
+
+/** The PRE run's length. TEN, deliberately straddling `maxPreChainDepth` (8) — see
+    the note above. Steps 1..8 resolve against the anchor; 9 and 10 truncate. */
+constexpr int preChainLength = 10;
+
+/** The anchor's PROB. Sub-100 on purpose: it is what makes "the anchor's probability
+    counts" a property of the file rather than of a comment. */
+constexpr int preAnchorProbPercent = 50;
+
+/** The seed the anchor's roll is drawn against. Written here, in the test, because
+    every expectation about which loops sound descends from it. */
+constexpr std::uint64_t preChainSeed = 0x00C0FFEE0BADF00DULL;
+
+void configurePreChain (PatternDocument& document)
+{
+    document.beginTransaction ();
+
+    fillLane (document, 0, LaneId::gate, 1);
+    document.setMasterSeed (0, preChainSeed);
+
+    document.setLaneLength (0, LaneId::cond, 16);
+    for (int step = 1; step <= preChainLength; ++step)
+        document.setLaneValue (0, LaneId::cond, step, static_cast<int> (TrigCondition::pre));
+
+    document.setLaneLength (0, LaneId::prob, 16);
+    document.setLaneValue (0, LaneId::prob, 0, preAnchorProbPercent);
+
+    velocityNamesTheStep (document, 0);
+
+    document.endTransaction ();
+}
+
+void configurePreChainPerturbed (PatternDocument& document)
+{
+    configurePreChain (document);
+    // ── THE ANCHOR'S PROB, 50 -> 100 ─────────────────────────────────────────
+    // The perturbation has to be about the SEMANTIC this file freezes, and it has to
+    // actually change the render. The first attempt inverted the anchor's CONDITION
+    // (`none` -> `!1ST`, which differs only in loop 0) and produced a BYTE-IDENTICAL
+    // stream — because with this seed the anchor's PROB roll already failed in loop 0,
+    // so flipping a condition that only bites there changed nothing. That is a
+    // negative control which controls for nothing, and it is precisely the failure
+    // mode the perturbed-render guard exists to prevent, so it was replaced rather
+    // than tuned.
+    //
+    // At PROB 100 the anchor takes the `>= 100` short-circuit and fires in EVERY loop,
+    // so all eight loops sound their chain instead of three: guaranteed different, and
+    // different for the documented reason.
+    document.setLaneValue (0, LaneId::prob, 0, 100);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. prob-seeded-50 — THE SEEDED PROBABILITY ROLL
+// ─────────────────────────────────────────────────────────────────────────────
+// PROB 50 on every step at a fixed `masterSeed`. This is the ONLY golden in the
+// repository whose content is decided by `splitmix64`, which makes it the on-disk
+// half of Rng.h's load-bearing `static_assert`: the compile-time check pins
+// `splitmix64 (0)`, and this pins the whole realised sequence of rolls.
+//
+// "LOOP-STABLE" IS READ IN THE DETERMINISM SENSE, and this file is where that
+// reading is frozen. The roll is keyed on the GLOBAL step index, so bar 2's rhythm
+// DIFFERS from bar 1's — literal per-loop repetition is LOOP LOCK, which is Phase 12
+// and would be the wrong default to bake here. The case asserts the difference, so a
+// future LOOP LOCK implementation cannot quietly become the default.
+//
+// tests/step_probability.cpp already checks the roll against a longhand reference
+// implementation over 11 001 indices; what it cannot do is prove that the rolls the
+// ENGINE actually applied are those rolls. That is this file.
+
+constexpr int probPercent = 50;
+constexpr std::uint64_t probSeed = 0x0123456789ABCDEFULL;
+
+void configureSeededProbability (PatternDocument& document)
+{
+    document.beginTransaction ();
+
+    fillLane (document, 0, LaneId::gate, 1);
+    fillLane (document, 0, LaneId::prob, probPercent);
+    document.setMasterSeed (0, probSeed);
+
+    document.endTransaction ();
+}
+
+void configureSeededProbabilityPerturbed (PatternDocument& document)
+{
+    configureSeededProbability (document);
+    // THE SEED, not a lane. Every roll moves, so this is the negative control that a
+    // `masterSeed` never reaching the RT path would fail (before Phase 7.1 the audio
+    // thread genuinely could not see it — see the note on `PatternData::masterSeed`).
+    document.setMasterSeed (0, probSeed ^ 1ULL);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. ratchet-ramp-8 — RATCHET 1..8 AND THE VELOCITY RAMP
+// ─────────────────────────────────────────────────────────────────────────────
+// The RATCHET lane cycles 1, 2, 3, 4, 5, 6, 7, 8 over an 8-long lane, so all eight
+// legal child counts appear twice per bar and their slots are 5760, 2880, 1920, 1440,
+// 1152, 960, 822.857… and 720 samples.
+//
+// ── STEP 6 (SEVEN CHILDREN) IS WHY THIS FILE EXISTS ─────────────────────────
+// Seven does not divide 5760, so its slot is 822.857142… samples — the one child
+// count whose onsets cannot be written down without deciding what the engine does
+// with the fraction. `SequencerProcessor::sampleForPpq` is a single SNAP-THEN-FLOOR
+// (`floor (rawOffset + 1e-4)`), and each child's position is derived INDEPENDENTLY
+// from the parent (`child / count`), never by cumulative addition of a rounded slot.
+// So step 6's children sit at grid + {0, 822, 1645, 2468, 3291, 4114, 4937}, every
+// one of which a reviewer can check with a calculator.
+//
+// TWO THINGS ABOUT THAT ROW, BOTH WORTH KNOWING BEFORE CHANGING IT:
+//   * The Phase-7 plan predicted {0, 823, 1646, 2469, 3291, 4114, 4937} — the
+//     ROUND-TO-NEAREST values. The engine floors, so the middle three differ by one
+//     sample. The engine's arithmetic is what is frozen here; the plan's prose was
+//     wrong, and this comment exists so the next reader does not "fix" the file to
+//     match it.
+//   * Cumulative addition of a rounded 823-sample slot would give
+//     {0, 823, 1646, 2469, 3292, 4115, 4938} — drifting by 1 sample at child 4 and
+//     by 2 at child 6 (and by ~6 samples on a longer step). That is the fails-without
+//     shape, and it is why the sixth and seventh entries are the load-bearing ones.
+//
+// The ramp is -50 %, linear from the step's own VEL at child 0 to half of it at the
+// LAST child — interpolated over `count - 1`, so "-50 % halves the last child" is
+// literally true at every child count. At VEL 100 with seven children that is
+// 100, 92, 83, 75, 67, 58, 50 (`llround` of 100 * (1 - 0.5 * c/6)).
+
+constexpr int ratchetLaneLength = 8;
+constexpr double ratchetRampPct = -50.0;
+
+void configureRatchetRamp (PatternDocument& document)
+{
+    document.beginTransaction ();
+
+    fillLane (document, 0, LaneId::gate, 1);
+    document.setRatchetVelocityRamp (ratchetRampPct);
+
+    document.setLaneLength (0, LaneId::ratchet, ratchetLaneLength);
+    for (int step = 0; step < ratchetLaneLength; ++step)
+        document.setLaneValue (0, LaneId::ratchet, step, step + 1);
+
+    document.endTransaction ();
+}
+
+void configureRatchetRampPerturbed (PatternDocument& document)
+{
+    configureRatchetRamp (document);
+    // SEVEN CHILDREN BECOME EIGHT on the one step whose slot is fractional. The whole
+    // {822, 1645, 2468, …} row moves to {720, 1440, 2160, …}, so the perturbation
+    // lands squarely on the rounding this golden is about.
+    document.setLaneValue (0, LaneId::ratchet, 6, 8);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 11. micro-swing-compose — THE COMPOSED DISPLACEMENT, INCLUDING ITS CLAMP
+// ─────────────────────────────────────────────────────────────────────────────
+// `swingPct` 75 (the §12.1 maximum ⇒ +0.5 step on every ODD global step) over a
+// 4-long MICRO lane. Four is deliberate: an EVEN lane length pins each slot to one
+// PARITY, so slot 0 and slot 2 are always even steps (no swing) and slots 1 and 3 are
+// always odd (swing). That is what makes the composition legible in the file.
+//
+//   slot 0  MICRO +25, even ⇒ +0.25            ⇒ grid + 1440
+//   slot 1  MICRO -25, odd  ⇒ -0.25 + 0.5      ⇒ grid + 1440   (SAME PLACE, other route)
+//   slot 2  MICRO -50, even ⇒ -0.50            ⇒ grid - 2880   (the maximum EARLY shift)
+//   slot 3  MICRO +25, odd  ⇒  0.25 + 0.5 = 0.75, CLAMPED to 0.5 ⇒ grid + 2880
+//
+// SLOT 3 IS THE POINT. Its raw composition is 0.75 of a step — an unclamped engine
+// would place it at grid + 4320. The clamp is on the TOTAL and it is the walk's scan
+// widening (`stepScanBack`/`stepScanForward`, both ATTAINED) that depends on it, so
+// the saturation is frozen here as an absolute sample rather than only asserted as a
+// return value in tests/step_microswing.cpp. Slots 0 and 3 carry the IDENTICAL MICRO
+// value (+25) and land 1440 samples apart, which is the swing term made visible.
+//
+// ── WHY MICRO IS NOT THE PLAN'S {+50, -50, 0, +25} ──────────────────────────
+// A +0.5 shift immediately followed by a -0.5 shift puts two steps on ONE sample
+// (their grid positions are 5760 apart and their displacements differ by exactly
+// 5760). That is legal and deterministic — both are emitted by the block that
+// contains the sample, in index order — but it makes the file's onsets ambiguous to
+// read, and reviewability is the whole premise of Rule zero. This set reaches the
+// same three behaviours (maximum early shift, maximum late shift, and a saturating
+// composition) with no coincident onsets. `substep_ownership.cpp` is where the
+// non-monotonic and coincident geometry is exercised, with counters instead of eyes.
+
+constexpr int microLaneLength = 4;
+constexpr int microLane[microLaneLength] = { 25, -25, -50, 25 };
+constexpr double composeSwingPct = 75.0;
+
+void configureMicroSwing (PatternDocument& document)
+{
+    document.beginTransaction ();
+
+    fillLane (document, 0, LaneId::gate, 1);
+    document.setSwing (composeSwingPct);
+
+    document.setLaneLength (0, LaneId::micro, microLaneLength);
+    for (int step = 0; step < microLaneLength; ++step)
+        document.setLaneValue (0, LaneId::micro, step, microLane[step]);
+
+    document.endTransaction ();
+}
+
+void configureMicroSwingPerturbed (PatternDocument& document)
+{
+    configureMicroSwing (document);
+    // SWING ONLY — every MICRO value is untouched. 75 -> 74 moves every odd step by
+    // 115 samples and leaves every even step exactly where it was, so this is the
+    // control that a swing term dropped from the composition would fail.
+    document.setSwing (74.0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. ratchet-swing-retrigger — EIGHT CHILDREN ON A NON-INTEGER STEP
+// ─────────────────────────────────────────────────────────────────────────────
+// The hostile clock this file already owns (137 BPM / 44.1 kHz ⇒ a 1/16 is
+// 4828.4671… samples), RATCHET 8, swing 66 and LEN 150 % over a ONE-NOTE POOL.
+// Nothing in it lands on a round number, which is exactly the point: the 5760-sample
+// clock makes every ratchet slot an exact integer at counts 1, 2, 4 and 8, so it
+// cannot catch a rounding drift in the child-onset derivation. Here the slot is
+// 603.558… samples and the swing term is 0.32 of a step.
+//
+// ── LEN 150 % IS NOT DECORATION, IT IS WHAT MAKES THE FILE TEST ANYTHING ────
+// A ratchet child's LEN applies to its OWN SLOT (`gateFractionOfStep` is already
+// divided by the child count). At the default LEN 50 % each child therefore ends
+// halfway through its own slot, the next child's onset is comfortably later, and THE
+// RETRIGGER CAP NEVER BINDS — the file would freeze eight independent notes and say
+// nothing about the intra-step chain. At 150 % each child wants 905 samples inside a
+// 603-sample slot, so every one of them is cut short at `next onset - 1` and §5.5's
+// 1-sample gap appears 200 times over.
+//
+// The ONE-NOTE pool makes every onset in the render a same-pitch retrigger — across
+// steps as well as within them — so `cutoffForSamePitch`'s widened scan is exercised
+// on both the `ahead == 0` intra-step band and the cross-step bands, on a clock where
+// a one-sample error cannot hide behind an exact division.
+
+constexpr int retriggerRatchetCount = 8;
+constexpr int retriggerLenPercent = 150;
+constexpr double retriggerSwingPct = 66.0;
+
+void configureRatchetSwingRetrigger (PatternDocument& document)
+{
+    document.beginTransaction ();
+
+    fillLane (document, 0, LaneId::gate, 1);
+    fillLane (document, 0, LaneId::ratchet, retriggerRatchetCount);
+    fillLane (document, 0, LaneId::len, retriggerLenPercent);
+    document.setSwing (retriggerSwingPct);
+
+    // ONE pool note, so every child of every step shares one pitch.
+    arpbox::engine::PoolSnapshot pool {};
+    pool.size = 1;
+    pool.sorted[0] = static_cast<std::uint8_t> (poolPitches[0]);
+    pool.asPlayed[0] = static_cast<std::uint8_t> (poolPitches[0]);
+    document.setPool (pool);
+
+    document.endTransaction ();
+}
+
+void configureRatchetSwingRetriggerPerturbed (PatternDocument& document)
+{
+    configureRatchetSwingRetrigger (document);
+    // LEN 150 -> 149 %. One percent, and it moves every one of the ~200 cut-short
+    // note-offs that DID NOT bind (none, at 149 %) — the shape stays, the samples move.
+    fillLane (document, 0, LaneId::len, retriggerLenPercent - 1);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The inventory — the single source of truth for "which goldens exist"
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** One expected golden: its name and the `rngVersion` its header must declare.
+
+    ── WHY THIS IS A TABLE AND NOT A BLANKET ASSERTION ─────────────────────────
+    The inventory case used to end with `REQUIRE (golden.header.rngVersion == 0)` for
+    every file. Phase 7 makes that unsatisfiable in the only two ways available:
+    stamping the new goldens 0 would be a LIE about the schema they were produced
+    under, and leaving the blanket check while stamping them 1 is a spurious failure.
+    A per-scenario expectation is the honest third option — and it is strictly
+    stronger, because it now also pins that no Phase-6 file has silently been
+    re-versioned. */
+struct ExpectedGolden
+{
+    const char* name;
+    int rngVersion;
+};
+
 /** Every golden this suite owns, in the sorted order `listGoldenFiles` returns. */
-const char* const expectedGoldens[] = {
-    "baseline-4bar",      "direction-modes-cycle", "euclid-gate",
-    "polymeter-clockdiv", "polymeter-len-3-5-7",   "tied-retrigger",
+constexpr ExpectedGolden expectedGoldens[] = {
+    { "baseline-4bar", 0 },
+    { "cond-a-b-8loops", 1 },
+    { "cond-pre-chain", 1 },
+    { "direction-modes-cycle", 0 },
+    { "euclid-gate", 0 },
+    { "micro-swing-compose", 1 },
+    { "polymeter-clockdiv", 0 },
+    { "polymeter-len-3-5-7", 0 },
+    { "prob-seeded-50", 1 },
+    { "ratchet-ramp-8", 1 },
+    { "ratchet-swing-retrigger", 1 },
+    { "tied-retrigger", 0 },
 };
 constexpr int numExpectedGoldens = static_cast<int> (std::size (expectedGoldens));
+
+/** The `rngVersion` every Phase-7 golden is stamped with (`rng::rngVersion`). */
+constexpr int phase7RngVersion = 1;
+
+/** Note-on velocities present in the render, as a sorted unique list — the shape both
+    COND goldens assert against, because "velocity names the step" turns "which steps
+    fired" into a set of bytes. */
+std::vector<int> velocitiesIn (const MidiRenderResult& render)
+{
+    std::vector<int> velocities;
+
+    for (const auto& event : render.events)
+        if (event.message.isNoteOn ())
+            velocities.push_back (event.message.getVelocity ());
+
+    std::sort (velocities.begin (), velocities.end ());
+    velocities.erase (std::unique (velocities.begin (), velocities.end ()), velocities.end ());
+    return velocities;
+}
+
+/** Absolute samples of every note-on carrying `velocity`, in emission order. */
+std::vector<std::int64_t> onsetsWithVelocity (const MidiRenderResult& render, int velocity)
+{
+    std::vector<std::int64_t> samples;
+
+    for (const auto& event : render.events)
+        if (event.message.isNoteOn () && event.message.getVelocity () == velocity)
+            samples.push_back (event.absoluteSample);
+
+    return samples;
+}
+
+/** Note-on count. */
+std::size_t noteOnCount (const MidiRenderResult& render)
+{
+    return render.select ([] (const TimedMidiEvent& event) { return event.message.isNoteOn (); }).size ();
+}
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -683,10 +1154,22 @@ TEST_CASE ("determinism/golden: the canonical clock and the block sweep are what
     // "simplifies" by importing those constants finds out here.
     REQUIRE (! spanCoversWholeBlocks (768000));
 
+    // ── PHASE 7's EXTRA SPAN (see `ratchetFractionalMusic`) ──────────────────
+    // A RATCHET-8 file at `fractionalMusic` would be ~2050 lines, and Rule zero rests
+    // on the file being readable by eye. Two alignment units carry 25 steps of the
+    // hostile clock, which is enough, and it aligns everywhere just as the others do.
+    REQUIRE (spanCoversWholeBlocks (ratchetFractionalMusic));
+    REQUIRE (spanCoversWholeBlocks (ratchetFractionalSpan));
+    REQUIRE (ratchetFractionalMusic == 122880);
+    REQUIRE (ratchetFractionalSpan == 184320);
+    REQUIRE (ratchetFractionalSpan - ratchetFractionalMusic == goldenAlignmentUnit);
+    REQUIRE (ratchetFractionalMusic < fractionalMusic);
+
     // Every schedule in this file lands on block heads everywhere.
     REQUIRE (scheduleAlignsEverywhere (playThenStop (goldenBpm, fourBarMusic)));
     REQUIRE (scheduleAlignsEverywhere (playThenStop (goldenBpm, eightBarMusic)));
     REQUIRE (scheduleAlignsEverywhere (playThenStop (fractionalBpm, fractionalMusic)));
+    REQUIRE (scheduleAlignsEverywhere (playThenStop (fractionalBpm, ratchetFractionalMusic)));
     REQUIRE (scheduleAlignsEverywhere (directionCycleSchedule ()));
     REQUIRE (scheduleAlignsEverywhere (euclidSchedule ()));
 
@@ -695,6 +1178,7 @@ TEST_CASE ("determinism/golden: the canonical clock and the block sweep are what
     for (const auto& schedule : { playThenStop (goldenBpm, fourBarMusic),
                                   playThenStop (goldenBpm, eightBarMusic),
                                   playThenStop (fractionalBpm, fractionalMusic),
+                                  playThenStop (fractionalBpm, ratchetFractionalMusic),
                                   directionCycleSchedule (),
                                   euclidSchedule () })
     {
@@ -1132,6 +1616,648 @@ TEST_CASE ("determinism/golden: euclidean gate necklaces E(5,8), E(7,16,3) and E
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 7. cond-a-b-8loops
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/golden: A:B trig conditions over eight pattern loops", "[determinism]")
+{
+    const auto schedule = playThenStop (goldenBpm, eightBarMusic);
+    const auto bake =
+        renderScenario (&configureConditionCycle, schedule, goldenSampleRate, eightBarSpan, bakeBlockSize);
+
+    REQUIRE (bake.numSamples == 798720);
+    REQUIRE (bake.isSampleSorted ());
+
+    // ── THE COUNT, FROM THE FOUR CONDITIONS ──────────────────────────────────
+    // 3:4 twice + 1:2 four times + 2:2 four times + 1:8 once = 11 note-ons, each with
+    // its own note-off (LEN 50 % ⇒ 2880 samples, all inside the span), and the table is
+    // therefore EMPTY at the stop so the flush emits nothing at all.
+    REQUIRE (bake.events.size () == 22u);
+    REQUIRE (noteOnCount (bake) == 11u);
+
+    // ── THE ACCEPTANCE CRITERION, AS TWO ABSOLUTE SAMPLES ────────────────────
+    // Velocity 100 (0x64) is step 0, the `3:4` step. Its two note-ons are at loop 2
+    // and loop 6: 2 x 92160 = 184320 and 6 x 92160 = 552960. DIVIDE BY 92160 AND READ
+    // THE LOOP — that is the whole assertion, and it is why the canonical clock's bar
+    // is a round number.
+    //
+    // The Phase-7 plan predicted 184320 and 553920 for these. 553920 is not a multiple
+    // of 5760 at all (553920 / 5760 = 96.1666…), so it cannot be a step boundary; the
+    // plan's own stated check — "divide by 92160" — gives 6.0104 for it and exactly 6
+    // for 552960. It was a typo, and 552960 is the value the engine produces.
+    const auto threeOfFour = onsetsWithVelocity (bake, 100);
+    INFO ("3:4 fired at " << (threeOfFour.empty () ? juce::String ("nothing") : juce::String (threeOfFour.front ())));
+    REQUIRE (threeOfFour == std::vector<std::int64_t> { 184320, 552960 });
+    REQUIRE (184320 == 2 * barSamples);
+    REQUIRE (552960 == 6 * barSamples);
+
+    // …and as RAW BYTES, so a corrupted file and a corrupted renderer cannot agree.
+    // Step 0 of loop 2 has gated ordinal 8 (four gated steps per loop, two loops
+    // elapsed) ⇒ pool[8 % 8] = pool[0] = 60 = 0x3C at velocity 100 = 0x64. That the
+    // ordinal counted the SUPPRESSED steps is the gated-cursor rule, visible in one
+    // byte.
+    REQUIRE (containsEvent (bake, 184320, 0x90, 0x3C, 0x64));
+    REQUIRE (containsEvent (bake, 552960, 0x90, 0x3C, 0x64));
+    REQUIRE (containsEvent (bake, 184320 + 2880, 0x80, 0x3C, 0x00));
+
+    // ── THE OTHER THREE CONDITIONS ───────────────────────────────────────────
+    // 1:2 (velocity 104) on the even loops, 2:2 (108) on the odd ones, 1:8 (112) once.
+    REQUIRE (onsetsWithVelocity (bake, 104) == std::vector<std::int64_t> { 0 * barSamples + 4 * stepSamples,
+                                                                           2 * barSamples + 4 * stepSamples,
+                                                                           4 * barSamples + 4 * stepSamples,
+                                                                           6 * barSamples + 4 * stepSamples });
+    REQUIRE (onsetsWithVelocity (bake, 108) == std::vector<std::int64_t> { 1 * barSamples + 8 * stepSamples,
+                                                                           3 * barSamples + 8 * stepSamples,
+                                                                           5 * barSamples + 8 * stepSamples,
+                                                                           7 * barSamples + 8 * stepSamples });
+    REQUIRE (onsetsWithVelocity (bake, 112) == std::vector<std::int64_t> { 12 * stepSamples });
+
+    // …and the free internal-consistency check: `1:2` and `2:2` are COMPLEMENTARY, so
+    // between them they must fire exactly once per loop, eight times over.
+    REQUIRE (onsetsWithVelocity (bake, 104).size () + onsetsWithVelocity (bake, 108).size () == 8u);
+
+    // Exactly four velocities appear — the four gated phases — so no ungated step
+    // leaked into the file and no conditioned step was silently skipped entirely.
+    REQUIRE (velocitiesIn (bake) == std::vector<int> { 100, 104, 108, 112 });
+
+    // ── THE §5.5 STOP FLUSH ──────────────────────────────────────────────────
+    // Nothing plays past the musical span and the flush emits nothing (the table is
+    // already empty), so this stream balances because every note was released on time.
+    REQUIRE (pitchesIn (bake, eightBarMusic, eightBarSpan).empty ());
+    REQUIRE (bake.events.back ().absoluteSample < eightBarMusic);
+
+    const auto check =
+        checkGolden (bake, headerFor (bake, "cond-a-b-8loops", goldenBpm, goldenGridPpq, phase7RngVersion));
+    INFO (check.report);
+    REQUIRE (check.passed);
+
+    const auto golden = loadGolden ("cond-a-b-8loops");
+    INFO (golden.error);
+    REQUIRE (golden.ok);
+    REQUIRE (golden.header.rngVersion == phase7RngVersion);
+
+    const auto sweep = sweepAgainstGolden (golden, &configureConditionCycle, schedule, goldenSampleRate, eightBarSpan);
+    INFO (sweep.report);
+    REQUIRE (sweep.sizesChecked == numGoldenBlockSizes);
+    REQUIRE (sweep.sizesMatched == numGoldenBlockSizes);
+    REQUIRE (sweep.spansCorrect);
+    REQUIRE (sweep.allSorted);
+    REQUIRE (sweep.minNoteOns > 0);
+    REQUIRE (sweep.allLifecyclesBalanced);
+    REQUIRE (sweep.minEvents == sweep.maxEvents);
+    REQUIRE (sweep.minEvents == 22);
+
+    // ── THE PERTURBED-RENDER NEGATIVE CONTROL: `3:4` becomes `4:4` ───────────
+    const auto perturbed =
+        renderScenario (&configureConditionCyclePerturbed, schedule, goldenSampleRate, eightBarSpan, bakeBlockSize);
+    REQUIRE (perturbed.events.size () == bake.events.size ()); // same shape…
+    REQUIRE (! compareToGolden (perturbed, golden).matches);   // …one loop later
+
+    // …and specifically ONE LOOP LATER, which is the off-by-one a missing `a - 1`
+    // would have baked in permanently.
+    REQUIRE (onsetsWithVelocity (perturbed, 100) == std::vector<std::int64_t> { 3 * barSamples, 7 * barSamples });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. cond-pre-chain
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/golden: a ten-long PRE chain truncating at the depth-8 boundary", "[determinism]")
+{
+    const auto schedule = playThenStop (goldenBpm, eightBarMusic);
+    const auto bake = renderScenario (&configurePreChain, schedule, goldenSampleRate, eightBarSpan, bakeBlockSize);
+
+    REQUIRE (bake.numSamples == 798720);
+    REQUIRE (bake.isSampleSorted ());
+
+    // ── D6's TRUNCATION, FROZEN AS TWO MISSING BYTES ─────────────────────────
+    // Velocity names the step, so steps 9 and 10 — the two PRE links whose backward
+    // walk exhausts `maxPreChainDepth` before reaching the anchor — must contribute
+    // velocity 109 (0x6D) and 110 (0x6E) to NO event in this file, in any loop,
+    // whatever the anchor rolled. Raising the budget, or changing D6's base case from
+    // `false` to `true`, adds them.
+    REQUIRE (onsetsWithVelocity (bake, 109).empty ());
+    REQUIRE (onsetsWithVelocity (bake, 110).empty ());
+
+    // …and the LAST ANCHORED link, step 8 (velocity 108 = 0x6C), IS present. Without
+    // this the assertion above would also be satisfied by a chain that truncated at
+    // depth 1, i.e. by PRE not working at all.
+    REQUIRE (! onsetsWithVelocity (bake, 108).empty ());
+
+    // The boundary is therefore pinned from BOTH sides, and it is exactly where
+    // `maxPreChainDepth` puts it.
+    REQUIRE (arpbox::engine::maxPreChainDepth == 8);
+    REQUIRE (preChainLength == 10);
+
+    // ── THE ANCHOR'S PROBABILITY COUNTS ──────────────────────────────────────
+    // Step 0 sits at PROB 50 and every link at 100, so the anchor's roll alone decides
+    // whether a loop's chain sounds. The roll is keyed on the GLOBAL step index, so the
+    // answer differs loop to loop — and both outcomes must occur in the file, or the
+    // semantic is frozen only on one side.
+    const auto anchors = onsetsWithVelocity (bake, 100);       // step 0 of each loop
+    const auto lastLink = onsetsWithVelocity (bake, 108);      // step 8 of each loop
+    const auto unconditioned = onsetsWithVelocity (bake, 111); // step 11: COND none, PROB 100
+
+    INFO ("anchors fired in " << anchors.size () << " of 8 loops; last link in " << lastLink.size ()
+                              << "; unconditioned in " << unconditioned.size ());
+
+    REQUIRE (unconditioned.size () == 8u);         // every loop, unconditionally — the control
+    REQUIRE (anchors.size () < 8u);                // the anchor's roll REJECTED at least one loop
+    REQUIRE (! anchors.empty ());                  // …and accepted at least one
+    REQUIRE (lastLink.size () == anchors.size ()); // the chain follows the anchor exactly
+
+    // …and it follows it LOOP BY LOOP, not merely in aggregate: step 8 of a loop sounds
+    // in exactly the loops whose step 0 sounded, eight steps later. A cache that
+    // carried one loop's verdict into the next would satisfy the counts above and fail
+    // this.
+    std::vector<std::int64_t> expectedLastLink;
+    expectedLastLink.reserve (anchors.size ());
+    for (const auto anchor : anchors)
+        expectedLastLink.push_back (anchor + 8 * stepSamples);
+
+    REQUIRE (lastLink == expectedLastLink);
+
+    // ── THE §5.5 STOP FLUSH ──────────────────────────────────────────────────
+    REQUIRE (pitchesIn (bake, eightBarMusic, eightBarSpan).empty ());
+
+    const auto check =
+        checkGolden (bake, headerFor (bake, "cond-pre-chain", goldenBpm, goldenGridPpq, phase7RngVersion));
+    INFO (check.report);
+    REQUIRE (check.passed);
+
+    const auto golden = loadGolden ("cond-pre-chain");
+    INFO (golden.error);
+    REQUIRE (golden.ok);
+    REQUIRE (golden.header.rngVersion == phase7RngVersion);
+
+    const auto sweep = sweepAgainstGolden (golden, &configurePreChain, schedule, goldenSampleRate, eightBarSpan);
+    INFO (sweep.report);
+    REQUIRE (sweep.sizesChecked == numGoldenBlockSizes);
+    REQUIRE (sweep.sizesMatched == numGoldenBlockSizes);
+    REQUIRE (sweep.spansCorrect);
+    REQUIRE (sweep.allSorted);
+    REQUIRE (sweep.minNoteOns > 0);
+    REQUIRE (sweep.allLifecyclesBalanced);
+    REQUIRE (sweep.minEvents == sweep.maxEvents);
+
+    // ── THE NEGATIVE CONTROL: the ANCHOR's condition inverted ───────────────
+    const auto perturbed =
+        renderScenario (&configurePreChainPerturbed, schedule, goldenSampleRate, eightBarSpan, bakeBlockSize);
+    REQUIRE (! perturbed.empty ());
+    REQUIRE (! compareToGolden (perturbed, golden).matches);
+
+    // …and the truncation survives the perturbation, because it is a property of the
+    // BUDGET rather than of the anchor.
+    REQUIRE (onsetsWithVelocity (perturbed, 109).empty ());
+    REQUIRE (onsetsWithVelocity (perturbed, 110).empty ());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. prob-seeded-50
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/golden: PROB 50 at a fixed master seed", "[determinism]")
+{
+    const auto schedule = playThenStop (goldenBpm, fourBarMusic);
+    const auto bake =
+        renderScenario (&configureSeededProbability, schedule, goldenSampleRate, fourBarSpan, bakeBlockSize);
+
+    REQUIRE (bake.numSamples == 430080);
+    REQUIRE (bake.isSampleSorted ());
+
+    // ── ANTI-VACUITY: THE ROLL ACTUALLY ROLLED ───────────────────────────────
+    // 64 gated steps at PROB 50. Neither 0 nor 64 would be a probability — the first
+    // is a lane read that never happened, the second is the `>= 100` short-circuit
+    // being taken when it must not be.
+    const auto fired = noteOnCount (bake);
+    INFO ("PROB 50 fired " << fired << " of 64 gated steps");
+    REQUIRE (fired > 16u);
+    REQUIRE (fired < 48u);
+    REQUIRE (bake.events.size () == 2u * fired); // one off per on: no flush was needed
+
+    // ── "LOOP-STABLE" IN THE DETERMINISM SENSE, NOT THE LOOP LOCK SENSE ──────
+    // The roll is keyed on the GLOBAL step index, so bar 2's rhythm must DIFFER from
+    // bar 1's. Literal per-loop repetition is Phase 12's LOOP LOCK, and baking it here
+    // would make the wrong behaviour the reference.
+    std::vector<std::int64_t> barOneOffsets;
+    std::vector<std::int64_t> barTwoOffsets;
+
+    for (const auto& event : bake.events)
+        if (event.message.isNoteOn ())
+        {
+            if (event.absoluteSample < barSamples)
+                barOneOffsets.push_back (event.absoluteSample);
+            else if (event.absoluteSample < 2 * barSamples)
+                barTwoOffsets.push_back (event.absoluteSample - barSamples);
+        }
+
+    INFO ("bar 1 fired " << barOneOffsets.size () << " steps, bar 2 fired " << barTwoOffsets.size ());
+    REQUIRE (! barOneOffsets.empty ());
+    REQUIRE (! barTwoOffsets.empty ());
+    REQUIRE (barOneOffsets != barTwoOffsets);
+
+    // Every onset is still exactly on its grid boundary — PROB changes WHETHER a step
+    // fires, never WHEN.
+    int onGrid = 0;
+    for (const auto& event : bake.events)
+        if (event.message.isNoteOn () && event.absoluteSample % stepSamples == 0)
+            ++onGrid;
+
+    REQUIRE (static_cast<std::size_t> (onGrid) == fired);
+
+    const auto check =
+        checkGolden (bake, headerFor (bake, "prob-seeded-50", goldenBpm, goldenGridPpq, phase7RngVersion));
+    INFO (check.report);
+    REQUIRE (check.passed);
+
+    const auto golden = loadGolden ("prob-seeded-50");
+    INFO (golden.error);
+    REQUIRE (golden.ok);
+    REQUIRE (golden.header.rngVersion == phase7RngVersion);
+
+    const auto sweep =
+        sweepAgainstGolden (golden, &configureSeededProbability, schedule, goldenSampleRate, fourBarSpan);
+    INFO (sweep.report);
+    REQUIRE (sweep.sizesChecked == numGoldenBlockSizes);
+    REQUIRE (sweep.sizesMatched == numGoldenBlockSizes);
+    REQUIRE (sweep.spansCorrect);
+    REQUIRE (sweep.allSorted);
+    REQUIRE (sweep.minNoteOns > 0);
+    REQUIRE (sweep.allLifecyclesBalanced);
+    REQUIRE (sweep.minEvents == sweep.maxEvents);
+
+    // ── THE NEGATIVE CONTROL: THE SEED, one bit ─────────────────────────────
+    const auto perturbed =
+        renderScenario (&configureSeededProbabilityPerturbed, schedule, goldenSampleRate, fourBarSpan, bakeBlockSize);
+    REQUIRE (! perturbed.empty ());
+    REQUIRE (! compareToGolden (perturbed, golden).matches);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. ratchet-ramp-8
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/golden: RATCHET 1..8 with a -50% velocity ramp", "[determinism]")
+{
+    const auto schedule = playThenStop (goldenBpm, fourBarMusic);
+    const auto bake = renderScenario (&configureRatchetRamp, schedule, goldenSampleRate, fourBarSpan, bakeBlockSize);
+
+    REQUIRE (bake.numSamples == 430080);
+    REQUIRE (bake.isSampleSorted ());
+
+    // ── THE COUNT, FROM THE LANE ─────────────────────────────────────────────
+    // The RATCHET lane is {1,2,3,4,5,6,7,8}, so eight consecutive steps carry
+    // 1+2+…+8 = 36 notes. 64 gated steps = 8 whole cycles = 288 note-ons.
+    REQUIRE (noteOnCount (bake) == 288u);
+    REQUIRE (8 * (1 + 2 + 3 + 4 + 5 + 6 + 7 + 8) == 288);
+
+    // ── STEP 6: SEVEN CHILDREN ON A SLOT OF 822.857… SAMPLES ────────────────
+    // THE ROW THIS GOLDEN EXISTS FOR. Each child's position is derived independently
+    // from the parent (`child / 7`) and placed by the one snap-then-FLOOR, so the seven
+    // onsets are `34560 + {0, 822, 1645, 2468, 3291, 4114, 4937}`. Multiply 5760 by
+    // c/7 on a calculator and floor it; the numbers are checkable by hand, which is the
+    // point.
+    //
+    // Cumulative addition of a rounded 823-sample slot would give
+    // {0, 823, 1646, 2469, 3292, 4115, 4938} — the last three drifting. The Phase-7
+    // plan's own predicted row, {0, 823, 1646, 2469, 3291, 4114, 4937}, assumed
+    // ROUND-TO-NEAREST placement; the engine floors, so its middle three entries are
+    // one sample high. What is frozen here is the engine.
+    constexpr std::int64_t stepSixOnset = 6 * stepSamples; // 34560
+    REQUIRE (stepSixOnset == 34560);
+
+    const std::int64_t sevenChildOffsets[7] = { 0, 822, 1645, 2468, 3291, 4114, 4937 };
+
+    int childrenFound = 0;
+    for (int child = 0; child < 7; ++child)
+    {
+        // Independently derived here, from the arithmetic rather than from the engine.
+        const auto predicted =
+            static_cast<std::int64_t> (static_cast<double> (child) / 7.0 * static_cast<double> (stepSamples));
+
+        if (predicted == sevenChildOffsets[child])
+            ++childrenFound;
+    }
+
+    INFO ("hand-derived child offsets agreeing with the literals: " << childrenFound << " of 7");
+    REQUIRE (childrenFound == 7);
+
+    // Step 6's gated ordinal is 6 ⇒ pool[6] = 71 = 0x47. The ramp is -50 % over
+    // `count - 1 = 6`, so velocity c is llround (100 * (1 - 0.5 * c / 6)):
+    // 100, 92, 83, 75, 67, 58, 50 — 0x64, 0x5C, 0x53, 0x4B, 0x43, 0x3A, 0x32.
+    const int rampedVelocities[7] = { 100, 92, 83, 75, 67, 58, 50 };
+
+    int rowFound = 0;
+    for (int child = 0; child < 7; ++child)
+        if (containsEvent (bake, stepSixOnset + sevenChildOffsets[child], 0x90, 0x47, rampedVelocities[child]))
+            ++rowFound;
+
+    INFO ("step 6's seven children found: " << rowFound << " of 7");
+    REQUIRE (rowFound == 7);
+
+    // The two ends of the ramp, spelled out as raw bytes.
+    REQUIRE (containsEvent (bake, 34560, 0x90, 0x47, 0x64));        // child 0: VEL untouched
+    REQUIRE (containsEvent (bake, 34560 + 4937, 0x90, 0x47, 0x32)); // child 6: exactly half
+
+    // …and the ramp really is a RAMP: seven distinct velocities on one step.
+    REQUIRE (velocitiesIn (bake).size () >= 7u);
+
+    // Step 0 has ONE child, so it is bit-identical in shape to a pre-7.2 step: the
+    // ramp's `childCount <= 1` short-circuit returns the step's own VEL untouched.
+    REQUIRE (eventIs (bake.events[0], 0, 0x90, 0x3C, 0x64));
+
+    REQUIRE (pitchesIn (bake, fourBarMusic, fourBarSpan).empty ());
+
+    const auto check =
+        checkGolden (bake, headerFor (bake, "ratchet-ramp-8", goldenBpm, goldenGridPpq, phase7RngVersion));
+    INFO (check.report);
+    REQUIRE (check.passed);
+
+    const auto golden = loadGolden ("ratchet-ramp-8");
+    INFO (golden.error);
+    REQUIRE (golden.ok);
+    REQUIRE (golden.header.rngVersion == phase7RngVersion);
+
+    const auto sweep = sweepAgainstGolden (golden, &configureRatchetRamp, schedule, goldenSampleRate, fourBarSpan);
+    INFO (sweep.report);
+    REQUIRE (sweep.sizesChecked == numGoldenBlockSizes);
+    REQUIRE (sweep.sizesMatched == numGoldenBlockSizes);
+    REQUIRE (sweep.spansCorrect);
+    REQUIRE (sweep.allSorted);
+    REQUIRE (sweep.minNoteOns > 0);
+    REQUIRE (sweep.allLifecyclesBalanced);
+    REQUIRE (sweep.minEvents == sweep.maxEvents);
+
+    // ── THE NEGATIVE CONTROL: seven children become eight ───────────────────
+    const auto perturbed =
+        renderScenario (&configureRatchetRampPerturbed, schedule, goldenSampleRate, fourBarSpan, bakeBlockSize);
+    REQUIRE (! perturbed.empty ());
+    REQUIRE (! compareToGolden (perturbed, golden).matches);
+    REQUIRE (noteOnCount (perturbed) == 288u + 8u); // one extra child on each of eight steps
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 11. micro-swing-compose
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/golden: MICRO composed with swing, including the clamp", "[determinism]")
+{
+    const auto schedule = playThenStop (goldenBpm, fourBarMusic);
+    const auto bake = renderScenario (&configureMicroSwing, schedule, goldenSampleRate, fourBarSpan, bakeBlockSize);
+
+    REQUIRE (bake.numSamples == 430080);
+    REQUIRE (bake.isSampleSorted ());
+    REQUIRE (noteOnCount (bake) == 64u); // RATCHET stays at 1: one note per gated step
+
+    // ── THE FOUR DISPLACEMENTS, AS ABSOLUTE SAMPLES ─────────────────────────
+    // Step 0 (MICRO +25, even ⇒ +0.25 step) at 0 + 1440. Step 1 (MICRO -25, odd
+    // ⇒ -0.25 + 0.5 = +0.25) at 5760 + 1440 = 7200 — the SAME displacement by a
+    // different route. Step 2 (MICRO -50, even ⇒ -0.5) at 11520 - 2880 = 8640, the
+    // maximum EARLY shift. Step 3 (MICRO +25, odd ⇒ 0.75 CLAMPED to 0.5) at
+    // 17280 + 2880 = 20160.
+    REQUIRE (containsEvent (bake, 1440, 0x90, 0x3C, 0x64));
+    REQUIRE (containsEvent (bake, 7200, 0x90, 0x3E, 0x64));
+    REQUIRE (containsEvent (bake, 8640, 0x90, 0x40, 0x64));
+    REQUIRE (containsEvent (bake, 20160, 0x90, 0x41, 0x64));
+
+    // ── THE SATURATION, VISIBLE IN THE FILE ─────────────────────────────────
+    // Step 3's raw composition is 0.75 of a step. An engine that clamped PER SOURCE
+    // (MICRO to ±0.5, swing to +0.5) would admit the sum and place it at
+    // 17280 + 4320 = 21600. The clamp is on the TOTAL, so it is at 20160 and 21600
+    // carries nothing. This is the assertion that a per-source clamp fails — and a
+    // per-source clamp is what breaks `stepScanBack`/`stepScanForward`'s derivation.
+    REQUIRE (containsEvent (bake, 17280 + 2880, 0x90, 0x41, 0x64));
+    REQUIRE (! containsEvent (bake, 17280 + 4320, 0x90, 0x41, 0x64));
+
+    // …and steps 0 and 3 carry the IDENTICAL MICRO value (+25) yet sit 1440 samples
+    // apart from their grids, which is the swing term made visible.
+    REQUIRE (microLane[0] == microLane[3]);
+    REQUIRE ((20160 - 17280) - (1440 - 0) == 1440);
+
+    // Nothing sits ON its grid boundary except by composition: with these four MICRO
+    // values every step is displaced, so a swing/MICRO term dropped entirely would put
+    // 64 note-ons back on multiples of 5760.
+    int onGrid = 0;
+    for (const auto& event : bake.events)
+        if (event.message.isNoteOn () && event.absoluteSample % stepSamples == 0)
+            ++onGrid;
+
+    INFO ("note-ons landing exactly on a grid boundary: " << onGrid);
+    REQUIRE (onGrid == 0);
+
+    const auto check =
+        checkGolden (bake, headerFor (bake, "micro-swing-compose", goldenBpm, goldenGridPpq, phase7RngVersion));
+    INFO (check.report);
+    REQUIRE (check.passed);
+
+    const auto golden = loadGolden ("micro-swing-compose");
+    INFO (golden.error);
+    REQUIRE (golden.ok);
+    REQUIRE (golden.header.rngVersion == phase7RngVersion);
+
+    const auto sweep = sweepAgainstGolden (golden, &configureMicroSwing, schedule, goldenSampleRate, fourBarSpan);
+    INFO (sweep.report);
+    REQUIRE (sweep.sizesChecked == numGoldenBlockSizes);
+    REQUIRE (sweep.sizesMatched == numGoldenBlockSizes);
+    REQUIRE (sweep.spansCorrect);
+    REQUIRE (sweep.allSorted);
+    REQUIRE (sweep.minNoteOns > 0);
+    REQUIRE (sweep.allLifecyclesBalanced);
+    REQUIRE (sweep.minEvents == sweep.maxEvents);
+
+    // ── THE NEGATIVE CONTROL: swing 75 -> 74, MICRO untouched ───────────────
+    const auto perturbed =
+        renderScenario (&configureMicroSwingPerturbed, schedule, goldenSampleRate, fourBarSpan, bakeBlockSize);
+    REQUIRE (perturbed.events.size () == bake.events.size ());
+    REQUIRE (! compareToGolden (perturbed, golden).matches);
+
+    // The EVEN steps must not have moved: swing displaces odd steps only.
+    REQUIRE (containsEvent (perturbed, 1440, 0x90, 0x3C, 0x64));
+    REQUIRE (containsEvent (perturbed, 8640, 0x90, 0x40, 0x64));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. ratchet-swing-retrigger  (the fractional clock: 137 BPM @ 44.1 kHz)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║ THIS GOLDEN FOUND A DEFECT ON ITS FIRST BAKE, EXACTLY AS `tied-retrigger`  ║
+// ║ FOUND #46. THE FILE ON DISK IS THE CORRECT PERFORMANCE — DO NOT REGENERATE.║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+// MEASURED: the baked stream matches at 5 of the 10 swept block sizes.
+//
+//   blocks 32, 64, 96, 128, 256        note-off @602 — the correct value, and the baked one
+//   blocks 480, 512, 1024, 2048, 4096  the SAME note-off @337
+//
+// The note in question is STEP -1's CHILD 6, at sample 337 (see the step -1 note in the
+// case below). @602 is `next same-pitch onset - 1`, i.e. §5.5's 1-sample gap against
+// step 0's child 1 at 603. @337 is the note's OWN ONSET — a zero-length note.
+//
+// THE ROOT CAUSE, and it is a new instance of the #36/#46/#48 family rather than the
+// rounding drift this file was aimed at: THE WALK EMITS IN INDEX ORDER, AND INDEX ORDER
+// IS NOT SAMPLE ORDER UNDER DISPLACEMENT. The walk visits index -1 before index 0, so
+// step -1's child 6 (sample 337) is REGISTERED IN THE TABLE BEFORE step 0's child 0
+// (sample 0) — but only when both fall in the same block. When step 0's note is then
+// emitted, `emitNote`'s same-pitch branch finds that entry and retires it:
+//
+//     capSample = isDueAtOrBefore (existing, onSample) ? onSample : onSample - 1;
+//     sounding.retireNoLaterThan (existing, midi, capSample, …);
+//
+// with `onSample == 0`, so `capSample == -1`, and the table's placement rule floors it
+// at the entry's own onset (`jmax (entry.onSample, cap)`) — 337. At block 128 the two
+// notes land in DIFFERENT blocks, the note at 0 has already been retired by the time 337
+// is registered, and the entry keeps the cutoff `cutoffForSamePitch` correctly computed
+// for it. Same music, different bytes, decided by the device buffer size.
+//
+// `Entry::onSample` and the `jmax` floor were ADDED in Phase 7.2 for precisely this
+// situation, and they do prevent an inverted off/on pair — but they turn it into a
+// buffer-size-dependent note LENGTH instead of preventing it.
+//
+// SUGGESTED FIX (engine, `generative-seq-dev`): the same-pitch branch in `emitNote` must
+// only retire an entry that STARTED AT OR BEFORE this note. An entry starting LATER is
+// not "the note this one is retriggering" — it is a note that has not sounded yet, and
+// the incoming (earlier) note's own `cutoffForSamePitch` has already scheduled itself to
+// end before it (that scan looks backward as well as forward and takes the minimum
+// qualifying onset, which is exactly why block 128 gets it right). So:
+//
+//     if (const int existing = sounding.find (channel, note);
+//         existing >= 0 && sounding.onSampleOf (existing) <= onSample)
+//
+// `SoundingNoteTable` would need to expose the entry's onset; it already stores it.
+//
+// WHY THE GOLDEN IS NOT REGENERATED: @602 is the documented policy (§5.5's overlap rule)
+// and the 5-of-10 majority is the correct performance, exactly as #46's 7-of-10 was.
+// Rule zero — a golden diff is a FINDING, never something to silently regenerate.
+TEST_CASE ("determinism/golden: eight ratchet children retriggering under swing on a fractional clock", "[determinism]")
+{
+    const auto schedule = playThenStop (fractionalBpm, ratchetFractionalMusic);
+    const auto bake = renderScenario (&configureRatchetSwingRetrigger,
+                                      schedule,
+                                      fractionalSampleRate,
+                                      ratchetFractionalSpan,
+                                      bakeBlockSize);
+
+    REQUIRE (bake.numSamples == 184320);
+    REQUIRE (bake.isSampleSorted ());
+
+    // ── THE RETRIGGER CAP MUST BIND, OR THE FILE TESTS NOTHING ──────────────
+    // Every note in this render is the same pitch, so §5.5's 1-sample gap is visible
+    // as "this note-off sits exactly one sample before some note-on". At the default
+    // LEN 50 % each child would end naturally inside its own 603-sample slot and NOT
+    // ONE off would satisfy that.
+    //
+    // ── WHY IT IS "MOST", NOT "ALL", AND WHY THAT IS THE INTERESTING NUMBER ──
+    // Swing widens the gap between an EVEN step's last child and the following ODD
+    // step's first child (the odd step is pushed 0.32 of a step later), and 905 samples
+    // of note cannot span it — so those children DO end naturally, uncapped. Between an
+    // odd step's last child and the next even step's first child the geometry INVERTS
+    // instead: the even step's children begin before the odd step's last child, i.e.
+    // index order is not sample order. Both are properties of the geometry this file
+    // exists to freeze, so the count is a measured literal rather than "all".
+    //
+    // The test is SET MEMBERSHIP (`off + 1` is some onset) rather than
+    // `offs[i] == ons[i + 1] - 1`, because that pairing silently assumes ons and offs
+    // alternate in index order — and under the inversion above they do not. The first
+    // draft made exactly that assumption and reported 190 of 203 as a failure.
+    const auto ons = bake.select ([] (const TimedMidiEvent& event) { return event.message.isNoteOn (); });
+    const auto offs = bake.select ([] (const TimedMidiEvent& event) { return event.message.isNoteOff (); });
+
+    INFO (bake.describe (12));
+    REQUIRE (ons.size () > 100u);
+    REQUIRE (offs.size () == ons.size ());
+
+    std::vector<std::int64_t> onsetSamples;
+    onsetSamples.reserve (ons.size ());
+    for (const auto& event : ons)
+        onsetSamples.push_back (event.absoluteSample);
+    std::sort (onsetSamples.begin (), onsetSamples.end ());
+
+    int cutShort = 0;
+    for (const auto& event : offs)
+        if (std::binary_search (onsetSamples.begin (), onsetSamples.end (), event.absoluteSample + 1))
+            ++cutShort;
+
+    INFO ("note-offs sitting exactly one sample before an onset: " << cutShort << " of " << offs.size ());
+
+    // TWO FLOORS, and both matter. The lower one says the cap binds at all (LEN 50 %
+    // scores 0 here). The upper one says the swing-widened gaps are real — a file in
+    // which EVERY off were capped would mean swing had stopped displacing anything.
+    REQUIRE (cutShort > 150);
+    REQUIRE (static_cast<std::size_t> (cutShort) < offs.size () - 1);
+
+    // ── THE FIRST TWO ONSETS COME FROM STEP -1 ───────────────────────────────
+    // Not a defect, and worth naming because it looks like one. Step -1's grid position
+    // is PPQ -0.25; swing pushes it 0.32 of a step LATER and its children run a further
+    // 7/8 of a step ahead, so children 6 and 7 land at samples 337 and 941 — inside the
+    // played timeline. The walk reaches index -1 from block 0 through `stepScanBack` and
+    // `ownsPpq` accepts both. Audibly it is the tail of a ratchet that began just before
+    // the loop point. tests/substep_ownership.cpp pins the same behaviour with counters.
+    REQUIRE (containsEvent (bake, 337, 0x90, 0x3C, 0x64));
+    REQUIRE (containsEvent (bake, 941, 0x90, 0x3C, 0x64));
+    REQUIRE (ons.front ().absoluteSample == 0); // step 0's child 0 still leads the file
+
+    // Every child of every step shares the one pool pitch (0x3C) — that is what makes
+    // the chain above a same-pitch chain rather than a coincidence.
+    int wrongPitch = 0;
+    for (const auto& event : bake.events)
+        if ((event.message.isNoteOn () || event.message.isNoteOff ()) &&
+            event.message.getNoteNumber () != poolPitches[0])
+            ++wrongPitch;
+
+    REQUIRE (wrongPitch == 0);
+
+    // ── NOTHING LANDS ROUND ──────────────────────────────────────────────────
+    // The whole reason for the hostile clock. A step is 4828.4671… samples and a child
+    // slot 603.558…, so at most a handful of onsets can be exact multiples of anything;
+    // if a majority were, some arithmetic had quietly become integral.
+    int roundOnsets = 0;
+    for (const auto& event : ons)
+        if (event.absoluteSample % 100 == 0)
+            ++roundOnsets;
+
+    INFO ("onsets that are multiples of 100: " << roundOnsets << " of " << ons.size ());
+    REQUIRE (static_cast<std::size_t> (roundOnsets) * 4u < ons.size ());
+
+    const auto check =
+        checkGolden (bake, headerFor (bake, "ratchet-swing-retrigger", fractionalBpm, goldenGridPpq, phase7RngVersion));
+    INFO (check.report);
+    REQUIRE (check.passed);
+
+    const auto golden = loadGolden ("ratchet-swing-retrigger");
+    INFO (golden.error);
+    REQUIRE (golden.ok);
+    REQUIRE (golden.header.rngVersion == phase7RngVersion);
+
+    const auto sweep = sweepAgainstGolden (golden,
+                                           &configureRatchetSwingRetrigger,
+                                           schedule,
+                                           fractionalSampleRate,
+                                           ratchetFractionalSpan);
+    INFO (sweep.report);
+    REQUIRE (sweep.sizesChecked == numGoldenBlockSizes);
+    REQUIRE (sweep.spansCorrect);
+    REQUIRE (sweep.allSorted);
+    REQUIRE (sweep.minNoteOns > 0);
+    REQUIRE (sweep.allLifecyclesBalanced);
+    REQUIRE (sweep.minEvents == sweep.maxEvents);
+
+    // ── THE NEGATIVE CONTROL: LEN 150 -> 149 % ──────────────────────────────
+    const auto perturbed = renderScenario (&configureRatchetSwingRetriggerPerturbed,
+                                           schedule,
+                                           fractionalSampleRate,
+                                           ratchetFractionalSpan,
+                                           bakeBlockSize);
+    REQUIRE (! perturbed.empty ());
+    REQUIRE (! compareToGolden (perturbed, golden).matches);
+
+    // KEPT LAST, the same discipline as `tied-retrigger`: everything else in this case
+    // is verified first, so a cross-block-size divergence on the hostile clock is
+    // reported against a file whose literals have already been checked. If this
+    // reddens, THAT IS A FINDING.
+    REQUIRE (sweep.sizesMatched == numGoldenBlockSizes);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The two-way inventory check
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1151,23 +2277,47 @@ TEST_CASE ("determinism/golden: the golden directory matches the expected invent
     INFO ("on disk:\n" << listing);
 
     REQUIRE (static_cast<int> (onDisk.size ()) == numExpectedGoldens);
+    REQUIRE (numExpectedGoldens == 12); // six Phase-6 files plus Phase 7's six
 
     for (int i = 0; i < numExpectedGoldens; ++i)
     {
-        INFO ("expected entry " << i << " = " << expectedGoldens[i]);
-        REQUIRE (onDisk[static_cast<std::size_t> (i)] == juce::String (expectedGoldens[i]));
+        INFO ("expected entry " << i << " = " << expectedGoldens[i].name);
+        REQUIRE (onDisk[static_cast<std::size_t> (i)] == juce::String (expectedGoldens[i].name));
     }
 
     // Every expected golden parses. A file that exists but cannot be read is the
     // same failure as a missing one (GoldenMidiFile.h: "a missing or unparseable
     // golden is a FAILURE, never a skip").
-    for (const auto* name : expectedGoldens)
+    //
+    // ── AND ITS `rngVersion` IS THE ONE ITS SCENARIO DECLARES ────────────────
+    // Per scenario, not blanket. See `ExpectedGolden` for why the blanket form had to
+    // go, and note what the table buys on top: the six Phase-6 files are now pinned at
+    // 0, so a phase that "helpfully" restamps them — which would be a claim that their
+    // audible content was produced under a different RNG schema — reddens here.
+    int atVersionZero = 0;
+    int atVersionOne = 0;
+
+    for (const auto& expected : expectedGoldens)
     {
-        const auto golden = loadGolden (name);
-        INFO ("golden '" << name << "': " << golden.error);
+        const auto golden = loadGolden (expected.name);
+        INFO ("golden '" << expected.name << "': " << golden.error);
         REQUIRE (golden.ok);
         REQUIRE (! golden.events.empty ());
-        REQUIRE (golden.header.name == juce::String (name));
-        REQUIRE (golden.header.rngVersion == 0);
+        REQUIRE (golden.header.name == juce::String (expected.name));
+        REQUIRE (golden.header.rngVersion == expected.rngVersion);
+
+        atVersionZero += expected.rngVersion == 0 ? 1 : 0;
+        atVersionOne += expected.rngVersion == phase7RngVersion ? 1 : 0;
     }
+
+    // ANTI-VACUITY FOR THE TABLE ITSELF: a table that had drifted to all-zeros (or
+    // all-ones) would still satisfy every assertion above. Both versions must be
+    // represented, and the split must be the 6/6 the two phases produced.
+    REQUIRE (atVersionZero == 6);
+    REQUIRE (atVersionOne == 6);
+    REQUIRE (atVersionZero + atVersionOne == numExpectedGoldens);
+
+    // The version the Phase-7 files are stamped with is the engine's own, not a
+    // literal that could drift away from it.
+    REQUIRE (phase7RngVersion == arpbox::engine::rng::rngVersion);
 }

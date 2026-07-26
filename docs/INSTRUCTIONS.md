@@ -880,7 +880,7 @@ Full-codebase architecture compliance pass; verify every phase's success criteri
 ### Sequencer Core
 - [ ] Phase 5: Transport & Sequencer Node Scaffold
 - [ ] Phase 6: Pattern Model & Lanes
-- [ ] Phase 7: Step Logic
+- [x] Phase 7: Step Logic
 - [ ] Phase 8: Note Pool & MIDI Correctness
 
 ### Sound Section

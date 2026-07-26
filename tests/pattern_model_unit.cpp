@@ -53,6 +53,7 @@ using arpbox::engine::maxPoolSize;
 using arpbox::engine::maxSteps;
 using arpbox::engine::numLanes;
 using arpbox::engine::numPoolSizes;
+using arpbox::engine::numTrigConditions;
 using arpbox::engine::PatternChannel;
 using arpbox::engine::PatternDocument;
 using arpbox::engine::PatternSetState;
@@ -60,6 +61,7 @@ using arpbox::engine::PatternSnapshot;
 using arpbox::engine::PatternState;
 using arpbox::engine::PoolSnapshot;
 using arpbox::engine::RetirementQueue;
+using arpbox::engine::TrigCondition;
 using arpbox::test::AllocationSentinel;
 
 namespace
@@ -143,6 +145,61 @@ TEST_CASE ("sequencer/snapshot-build: every lane value is clamped into its §12.
     REQUIRE (snapshot->patterns[0].lanes[static_cast<std::size_t> (LaneId::len)].values[0] == 400);
     REQUIRE (snapshot->patterns[0].lanes[static_cast<std::size_t> (LaneId::micro)].values[1] == -50);
     REQUIRE (snapshot->patterns[0].lanes[static_cast<std::size_t> (LaneId::modB)].values[0] == 127);
+}
+
+TEST_CASE ("sequencer/lane-range: the COND lane's bound is pinned by LITERAL (issue #74)", "[unit]")
+{
+    // ── WHY THIS EXISTS NEXT TO A TEST THAT LOOKS LIKE IT ALREADY COVERS IT ────
+    // The clamp test directly above sweeps every lane and asserts
+    // `built.values[0] == range.hi` — where `range` is `laneRange (laneId)`, THE
+    // VERY EXPRESSION UNDER TEST. It proves the builder clamps to whatever
+    // `laneRange` currently says; it is VACUOUS with respect to what `laneRange`
+    // SHOULD say. Change the bound and both sides move together and the test stays
+    // green.
+    //
+    // THAT IS NOT HYPOTHETICAL. Issue #62 moved this exact bound from 22 to 38 (the
+    // A:B `:16` family, 8 new ordinals) and NOTHING IN THE SUITE OBSERVED IT. A
+    // silent change to this number silently reinterprets every saved pattern's COND
+    // lane — 1:4 becomes 3:8, with no error anywhere — which is why §12.2 and
+    // PatternTypes.h both call the enum append-only. Issue #74 is the request for a
+    // literal pin; this is it.
+    //
+    // These three lines are deliberately NOT derived from anything. If a legal
+    // append lands (a new named condition after `!NEI`), exactly these numbers move
+    // and the move is visible in the diff — which is the entire mechanism.
+    REQUIRE (laneRange (LaneId::cond).lo == 0);
+    REQUIRE (laneRange (LaneId::cond).hi == 38);
+    REQUIRE (numTrigConditions == 39);
+
+    // The composition of the 39, spelled out so a reader can check the arithmetic
+    // against §12.2's table without opening the enum: 1 `none` + 30 A:B + 8 named.
+    REQUIRE (1 + 30 + 8 == numTrigConditions);
+    REQUIRE (static_cast<int> (TrigCondition::none) == 0);
+    REQUIRE (static_cast<int> (TrigCondition::ab1of2) == 1);
+    REQUIRE (static_cast<int> (TrigCondition::ab16of16) == 30);
+    REQUIRE (static_cast<int> (TrigCondition::first) == 31);
+    REQUIRE (static_cast<int> (TrigCondition::notNei) == 38);
+
+    SECTION ("every legal ordinal round-trips through clampLaneValue unchanged")
+    {
+        // The clamp must be transparent across the WHOLE range, not merely at its
+        // ends: a bound written as `< numTrigConditions - 1` rather than `<=` would
+        // pass an endpoints-only check and quietly fold `!NEI` onto `!PRE`.
+        for (int ordinal = 0; ordinal < numTrigConditions; ++ordinal)
+        {
+            INFO ("COND ordinal " << ordinal);
+            REQUIRE (clampLaneValue (LaneId::cond, ordinal) == ordinal);
+        }
+    }
+
+    SECTION ("the first out-of-enum ordinal clamps down to the last legal one")
+    {
+        REQUIRE (clampLaneValue (LaneId::cond, numTrigConditions) == numTrigConditions - 1);
+        REQUIRE (clampLaneValue (LaneId::cond, 39) == 38);
+        REQUIRE (clampLaneValue (LaneId::cond, 32767) == 38);
+        REQUIRE (clampLaneValue (LaneId::cond, -1) == 0);
+        REQUIRE (clampLaneValue (LaneId::cond, -32768) == 0);
+    }
 }
 
 TEST_CASE ("sequencer/snapshot-build: lane length and division are clamped before the RT path", "[unit]")

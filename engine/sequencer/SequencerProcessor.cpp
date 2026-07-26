@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 
 namespace arpbox::engine
 {
@@ -26,6 +27,20 @@ namespace
     // hand this node a FRESH, small pool buffer after a render-sequence rebuild (a
     // synth swap, or this node's own async insertion), and re-checking every block
     // re-warms that buffer — a first-block-only flag would miss it.
+    //
+    // ── PHASE 7.2 DID NOT RAISE IT, AND THAT IS A DECISION, NOT AN OVERSIGHT ──
+    // Ratchets multiply this node's note events by up to 8. The worst additional
+    // traffic in one block is bounded by how many steps a block can contain: at the
+    // tightest supported step (735 samples) a 4096-sample block holds ~6 steps, each
+    // up to 8 children, each an on plus an off — 6 x 8 x 2 x 9 bytes ~= 864 bytes on
+    // top of the ~4.8 KB two-flush worst case this number was sized for. It fits with
+    // ~2.5 KB to spare.
+    //
+    // THAT MARGIN IS ARGUED, NOT PROVED, so the constant is deliberately left alone:
+    // raising it speculatively would make the argument unfalsifiable. The armed
+    // ratchet scenario in tests/pattern_alloc_guard.cpp is what turns it into a
+    // proof — if that goes red, 16384 is the answer, not a re-derivation of this
+    // paragraph.
     constexpr int outgoingWarmupBytes = 8192;
 
     // ── DETERMINISM SNAPS (see the extended note in SequencerProcessor.h) ─────
@@ -81,12 +96,163 @@ namespace
         return static_cast<std::int64_t> (snappedCeiling (ppq, stepPpq));
     }
 
-    // RT-SAFE: pure indexing. The `PatternData` sibling of `laneOf (PatternState&…)`
-    // in PatternTypes.h — a snapshot's lanes are the same array in a different struct.
-    const LaneState& laneOf (const PatternData& data, LaneId lane) noexcept
+    // RT-SAFE: THE ONLY OWNERSHIP TEST IN THIS FILE.
+    //
+    // Does THIS block emit an event whose musical position is `ppq`? Until Phase 7.2
+    // the walk answered a narrower question — "is the step INDEX inside this block's
+    // index range" — which is only the same question while an event sits exactly on
+    // its grid position. Once MICRO, swing and ratchets displace it, the index says
+    // nothing about which block contains the event, and the old formulation is wrong
+    // in BOTH directions: a positively displaced event belongs to a later block, a
+    // negatively displaced one to an earlier block.
+    //
+    // ── THE SAME TOLERANCE ON BOTH ENDS, AND WHAT THAT DOES AND DOES NOT BUY ─
+    // `snapPpq` is ONE expression — the same `stepIndexSnapSteps`, against the same
+    // `stepPpq` — subtracted from BOTH `blockStartPpq()` and `blockEndPpq()`. Be
+    // precise about what that achieves, because an earlier revision of this note
+    // claimed more than the code earns (issue #82).
+    //
+    // WHAT HOLDS. Block k's upper decision boundary is `blockEndPpq()_k - snapPpq` and
+    // block k+1's lower one is `blockStartPpq()_{k+1} - snapPpq`. The two are the SAME
+    // EXPRESSION, so they cannot drift as CODE — no edit can give one end a tolerance
+    // the other lacks — and their inputs are MATHEMATICALLY EQUAL, so the half-open
+    // spans tile the timeline. That is what makes ownership well defined and is the
+    // property the rest of this file relies on.
+    //
+    // WHAT DOES *NOT* HOLD: THE TILING IS NOT EXACT IN FLOATING POINT. Those two
+    // inputs are computed differently — `ppq_k + advance * pps` against
+    // `anchorPpq + (s_k + advance - anchor) * pps` — and agree only to within their
+    // rounding, measured at ~1e-10 steps (a few ulps at realistic PPQ magnitudes).
+    // SUBTRACTING THE SAME CONSTANT FROM BOTH DOES NOT MAKE THEM BITWISE EQUAL. The
+    // snap's WIDTH is irrelevant to that: "the snap is ~7 orders of magnitude wider
+    // than the disagreement" — the old justification — confuses the width of the
+    // tolerance with the POSITION of the residual. A gap/overlap of that ~1e-10-step
+    // width survives, RELOCATED from the block edge to `edge - snapPpq`, and an event
+    // landing inside it is owned by zero blocks (DROPPED) or by two (DUPLICATED).
+    //
+    // WHY THE DESIGN IS SOUND ANYWAY, AND THIS IS THE ACTUAL ARGUMENT: the snap moves
+    // the sensitive point OFF THE ATTRACTOR. Musical positions are rational multiples
+    // of `stepPpq` and therefore pile up ON block edges — MEASURED over 1.08e8 edges,
+    // the two expressions disagree bitwise at 24.2 % of them and 27123 of those
+    // disagreements straddle a step boundary, i.e. duplicate or skip a step. Nothing
+    // in the system systematically sits exactly `1e-6 * stepPpq` BELOW an edge. So the
+    // snap converts a systematic, high-rate, measured failure into an off-attractor
+    // coincidence of measure zero.
+    //
+    // WHAT A FUTURE READER MAY RELY ON, stated so it is usable: ownership is exact for
+    // every event whose PPQ is not within a few ulps of `edge - snapPpq`, which is
+    // every event any test or any piece of music has ever produced. It is NOT exact in
+    // the absolute sense, so do not build a proof on top of "exactly one block owns
+    // every event" — build it on "at most one, and exactly one off a measure-zero set".
+    // Closing the residual properly is issue #37 option (a) (derive the emission
+    // sample as a pure function of the boundary index against the segment anchor); this
+    // is the same residual family as #37 and #75, not a separate hazard.
+    //
+    // THE ONE CONSEQUENCE THAT IS NOT MERELY A SAMPLE: if the ADOPT STEP's `gridPpq`
+    // ever landed in the gap, no block would pass `ownsPpq` for it, the quantized
+    // switch would never fire, `pendingResolved` would stay set — and since issue #76
+    // `discontinuedByPatternSwitch` would go on suppressing that step's late children
+    // indefinitely. Measure-zero like the rest, but a liveness effect rather than a
+    // one-sample blemish, so it is the one worth naming.
+    //
+    // A SECOND TOLERANCE HERE IS STILL FORBIDDEN, and the sharper reason is now
+    // visible: a different constant, a different `stepPpq`, or a per-child sub-grid
+    // snap would put the two ends' residuals at DIFFERENT positions, which turns this
+    // measure-zero coincidence into a systematic disagreement — a gap or overlap of
+    // the tolerance's full width rather than of a few ulps. Neither shows up as a
+    // cross-buffer-size difference, because it happens identically at every size.
+    //
+    // NOT A RIVAL TO `snappedCeiling`: this is the SAME ceiling re-expressed. For
+    // integer `n`, `n >= snappedCeiling (blockStartPpq, stepPpq)` and
+    // `n * stepPpq >= blockStartPpq - snapPpq` are the same predicate, and likewise at
+    // the upper end. tests/boundary_agreement.cpp asserts that equivalence directly
+    // over its 9600-boundary sweep rather than leaving it as this paragraph.
+    bool ownsPpq (const Transport& transport, double ppq, double stepPpq) noexcept
     {
-        return data.lanes[static_cast<std::size_t> (lane)];
+        const double snapPpq = stepIndexSnapSteps * stepPpq; // SAME constant, SAME stepPpq, BOTH ends
+
+        return ppq >= transport.blockStartPpq () - snapPpq && ppq < transport.blockEndPpq () - snapPpq;
     }
+
+    // RT-SAFE: does an event belonging to step `index` reach the adopt boundary of a
+    // pattern switch resolved at `boundaryIndex`?
+    //
+    // TRUE means the event belongs to a step the OUTGOING pattern owns but SOUNDS at
+    // or after the point that pattern is discontinued (§5.5; `flushForPatternSwitch`:
+    // "THE OUTGOING PATTERN IS DISCONTINUED FROM `adoptSample` ONWARD"). Only ratchet
+    // children can be in that position: a step's own displacement is capped at ±0.5,
+    // so step `B - 1` cannot reach step `B`'s boundary on displacement alone, but a
+    // child sits a further 7/8 of a step ahead and 0.5 + 0.875 = 1.375 clears it by
+    // 0.375 of a step.
+    //
+    // THE INDEX TEST IS FIRST AND THAT ORDERING IS LOAD-BEARING: `boundaryIndex` is
+    // `INT64_MIN` when no switch has fired, and short-circuiting here keeps
+    // `boundaryIndex * stepPpq` — which would be a meaningless huge negative double —
+    // from being evaluated at all.
+    //
+    // THE SAME SNAP, THE SAME `stepPpq`, ONE MORE TIME. `eventPpq` is built as
+    // `index * stepPpq + shift * stepPpq + position * stepPpq` while the boundary is
+    // `boundaryIndex * stepPpq`, so on a non-dyadic grid (a triplet: stepPpq = 1/6)
+    // an event landing exactly ON the boundary can arrive an ulp below it. Subtracting
+    // `stepIndexSnapSteps * stepPpq` makes such an event count as AT the boundary,
+    // which is the same direction `snappedCeiling` and `ownsPpq` already round (the
+    // later side claims a coincident position). This is NOT a second tolerance in the
+    // sense `ownsPpq` warns about: no block quantity appears here, so the answer is
+    // identical in every carving and cannot make two blocks disagree about ownership.
+    bool
+    eventReachesAdoptBoundary (std::int64_t index, double eventPpq, std::int64_t boundaryIndex, double stepPpq) noexcept
+    {
+        if (index >= boundaryIndex)
+            return false;
+
+        const double snapPpq = stepIndexSnapSteps * stepPpq;
+
+        return eventPpq >= static_cast<double> (boundaryIndex) * stepPpq - snapPpq;
+    }
+
+    // ── THE SCAN WIDENING, DERIVED (Phase 7.2) ───────────────────────────────
+    // Because ownership is now decided on the PLACED position, the walk must VISIT
+    // every step index that could place an event inside this block — which is no
+    // longer just the indices whose grid position falls in it.
+    //
+    // An event placed by step `n` sits at `n + shift + child` steps, with
+    // `shift` in [-maxSubStepShiftSteps, +maxSubStepShiftSteps] and `child` in
+    // [0, maxChildAheadSteps]. Writing the block's owned span as [S, E) in steps:
+    //
+    //   n can reach forward into the block  ⟹  n + maxSubStepShiftSteps
+    //                                            + maxChildAheadSteps >= S
+    //                                       ⟹  n >= S - 1.375  ⟹  n >= ceil(S) - 2
+    //   n can reach backward into the block ⟹  n - maxSubStepShiftSteps < E
+    //                                       ⟹  n < E + 0.5     ⟹  n < ceil(E) + 1
+    //
+    // THIS IS TIGHT, NOT PADDING — BOTH BOUNDS ARE ATTAINED. `scanBack == 2` is
+    // reached whenever `frac(S) > 0.375` (e.g. S = 10.2: ceil(8.825) = 9 = 11 - 2),
+    // and `scanForward == 1` whenever `frac(E) > 0.5` (e.g. E = 10.7: n = 11 must be
+    // visited, and 11 < ceil(10.7) + 1 = 12 only because of the +1). Someone will
+    // eventually want to relax `maxSubStepShiftSteps` past 0.5; this note is what
+    // stops them doing it without re-deriving these two numbers. Widening the shift
+    // without widening the scan drops notes at block edges UNIFORMLY AT EVERY BUFFER
+    // SIZE, so no cross-size determinism test can see it — only literal event counts
+    // can (tests/substep_ownership.cpp).
+    // `std::ceil` is not guaranteed constant-evaluable in C++20, and these must be
+    // `constexpr` so the static_asserts below actually check the derivation at build
+    // time. Non-negative inputs only, which is all this is ever applied to.
+    constexpr std::int64_t ceilNonNegative (double x) noexcept
+    {
+        const auto truncated = static_cast<std::int64_t> (x);
+
+        return static_cast<double> (truncated) < x ? truncated + 1 : truncated;
+    }
+
+    constexpr std::int64_t stepScanBack = ceilNonNegative (maxSubStepShiftSteps + maxChildAheadSteps); // == 2
+    constexpr std::int64_t stepScanForward = ceilNonNegative (maxSubStepShiftSteps);                   // == 1
+
+    static_assert (stepScanBack == 2, "scan widening must be re-derived if the sub-step geometry changes");
+    static_assert (stepScanForward == 1, "scan widening must be re-derived if the sub-step geometry changes");
+
+    // `laneOf (const PatternData&, LaneId)` USED TO LIVE HERE. Phase 7.1 moved it to
+    // namespace scope in PatternSnapshot.h because StepLogic.cpp needs the identical
+    // accessor; see the note there.
 } // namespace
 
 SequencerProcessor::SequencerProcessor ()
@@ -113,7 +279,7 @@ SequencerProcessor::~SequencerProcessor ()
     //   WRONG: `releaseResources`/`prepareToPlay` are a matched pair the graph runs on
     //   every device change, and nothing republishes a snapshot in between — so
     //   retiring there would leave `activeSnapshot` permanently null and the node
-    //   permanently SILENT after the user switches audio device. Holding a ~100 KB
+    //   permanently SILENT after the user switches audio device. Holding a ~120 KB
     //   immutable object across a released period costs nothing and has no such hole.
     if (patternChannel != nullptr && activeSnapshot != nullptr)
         patternChannel->retire (activeSnapshot);
@@ -159,6 +325,19 @@ void SequencerProcessor::applyCommand (const EngineCommand& command) noexcept
         break;
     }
 
+    case EngineCommandType::setFillHeld:
+        // §12.2 FILL — pad 16 held. UNLIKE the pattern switch above there is no
+        // arithmetic to defer: this is a raw flag with no quantize boundary and no
+        // dependence on any latched transport value, so recording it here is the
+        // whole of the work. `processBlock` latches it once per block (see the latch
+        // site) and every step in the block sees the same value.
+        //
+        // ANY NON-ZERO READS AS HELD, per the command's documented payload contract
+        // in EngineCommand.h — no rejection path, because there is no malformed
+        // value a bool can take.
+        fillHeld = command.value.i != 0;
+        break;
+
     default:
         break;
     }
@@ -192,22 +371,26 @@ void SequencerProcessor::releaseResources ()
 }
 
 // RT-SAFE:
-StepEmission evaluateStep (const PatternSnapshot& snapshot, int patternIndex, std::int64_t stepIndex) noexcept
+StepEmission
+evaluateStep (const PatternSnapshot& snapshot, int patternIndex, std::int64_t stepIndex, StepRuntime runtime) noexcept
 {
-    // ── L0 NOTE POOL → L1 PATTERN CORE (§5.1) ────────────────────────────────
-    // A PURE function of the three parameters — no cursor, no accumulator, and (by
+    // ── L0 NOTE POOL → L1 PATTERN CORE → L2 STEP LOGIC (§5.1) ────────────────
+    // A PURE function of the four parameters — no cursor, no accumulator, and (by
     // construction, being a free function) no access to any `SequencerProcessor`
     // member at all. That is what makes §9's offline drag-out render bit-identical
     // to real time, what lets the transport be located anywhere without the
     // arpeggio shifting, and what makes `cutoffForSamePitch`'s lookahead sound.
-    // See "THE PURITY OF THE EMISSION CORE IS STRUCTURAL" in the header before
-    // adding anything here that is not derived from these three arguments.
+    // See "THE PURITY OF THE EMISSION CORE IS STRUCTURAL" in the header — and its
+    // Phase 7.1 amendment, which argues the fourth parameter — before adding
+    // anything here that is not derived from these four arguments.
     //
-    // LANES READ HERE (Phase 6): GATE, PITCH, OCT, VEL, LEN.
-    // LANES STORED BUT NOT READ, and by whom they will be:
-    //   RATCHET, MICRO → Phase 7.2 (ratchet subdivision, micro-timing + swing)
-    //   PROB, COND     → Phase 7.1 (probability roll, §12.2 trig conditions)
-    //   MOD A, MOD B   → Phase 14.1 (mod-matrix per-step sources)
+    // LANES READ HERE: GATE, PITCH, OCT, VEL, LEN (Phase 6); PROB, COND (Phase
+    // 7.1); MOD A, read by the `NEI`/`!NEI` conditions (Phase 7.1, user decision
+    // D7 — see `neighbourModThreshold` in StepLogic.h); MICRO and RATCHET (Phase
+    // 7.2 — MICRO composed with the snapshot's project-level `swingPct` into
+    // `shiftSteps`, RATCHET into the note list, with PROB re-read per child).
+    // TEN OF THE ELEVEN §12.1 LANES ARE NOW LIVE. The one that is not:
+    //   MOD B → Phase 14.1 (mod-matrix per-step source)
     // The omission is deliberate, not an oversight — see LaneId in PatternTypes.h,
     // which carries the same per-lane phase annotations.
 
@@ -217,6 +400,29 @@ StepEmission evaluateStep (const PatternSnapshot& snapshot, int patternIndex, st
     // SAME predicate `gatePrefixPulses` was summed from, so the fired steps and the
     // pool ordinal cannot drift apart.
     if (! PatternSnapshot::isGated (data, stepIndex))
+        return {};
+
+    // ── L2 STEP LOGIC (§5.1 L2, §12.2) ───────────────────────────────────────
+    // BOTH CHECKS SIT AFTER THE GATE CHECK AND BEFORE `poolIndexAt`, and that
+    // placement is the whole of the interaction between L2 and L1. A step
+    // suppressed here has already been counted by the GATE lane's prefix table, so
+    // it STILL CONSUMES ITS GATED ORDINAL and does not shift the pool traversal for
+    // every step after it. Moving either check below `poolIndexAt` would change
+    // nothing; moving the SUPPRESSION into the ordinal — which is the tempting
+    // "fix" — would make the arpeggio's pitch sequence a function of RNG draw
+    // count, i.e. of block carving. See "PHASE 7, READ THIS BEFORE YOU 'FIX' IT"
+    // on `PatternSnapshot::gatedOrdinal`.
+    //
+    // CONDITIONS GATE BEFORE PROBABILITY ROLLS (§5.1 L2), written in that order
+    // here. Worth knowing before "simplifying": with a per-index HASH rather than a
+    // stream, the two orders produce identical output today, because neither check
+    // consumes anything the other could observe. The order is preserved anyway,
+    // because that equivalence stops holding the instant anything downstream of
+    // this point becomes stateful, and §5.1 fixes which order is correct.
+    if (! conditionPasses (data, stepIndex, runtime))
+        return {};
+
+    if (! probabilityPasses (data, stepIndex))
         return {};
 
     // The pool size is clamped even though `PatternDocument::setPool` already clamps:
@@ -242,15 +448,107 @@ StepEmission evaluateStep (const PatternSnapshot& snapshot, int patternIndex, st
     emission.channel = snapshot.outputChannel;
 
     // Neither of these is range-clamped here: `poolNoteAtDegree` deliberately leaves
-    // fold-vs-clamp to the constraint gate (Phase 12.3), and `emitStep` applies the
+    // fold-vs-clamp to the constraint gate (Phase 12.3), and `emitNote` applies the
     // hard 0..127 / 1..127 MIDI limits as the last line of defence.
-    emission.note = poolNote + 12 * laneValueAt (laneOf (data, LaneId::oct), stepIndex);
-    emission.velocity = laneValueAt (laneOf (data, LaneId::vel), stepIndex);
+    const int stepNote = poolNote + 12 * laneValueAt (laneOf (data, LaneId::oct), stepIndex);
+    const int stepVelocity = laneValueAt (laneOf (data, LaneId::vel), stepIndex);
 
     // LEN is stored as a PERCENTAGE of the step, 1..400 (§12.1); >100% ⇒ tie/legato.
-    emission.gateFractionOfStep = static_cast<double> (laneValueAt (laneOf (data, LaneId::len), stepIndex)) / 100.0;
+    const double lenFractionOfStep = static_cast<double> (laneValueAt (laneOf (data, LaneId::len), stepIndex)) / 100.0;
+
+    // ── L2 RATCHETS (§5.1 L2, §12.1 RATCHET 1..8) ────────────────────────────
+    // The step becomes a LIST of notes at evenly spaced sub-step positions. Three
+    // decisions are written into the loop below and each has a comment on it,
+    // because each has a plausible-looking alternative that is wrong.
+    const int childCount = ratchetChildCount (data, stepIndex);
+
+    // LEN AGAINST THE CHILD'S OWN SLOT, NOT THE WHOLE STEP. Identical at
+    // `childCount == 1` — the default, and every pre-7.2 golden — which is what
+    // makes this change provably silent on existing material. See the long note on
+    // `StepEmission::noteCount` for why this is the only reading under which LEN >
+    // 100 % ties across children.
+    const double childGateFraction = lenFractionOfStep / static_cast<double> (childCount);
+
+    for (int child = 0; child < childCount; ++child)
+    {
+        // PER-CHILD PROBABILITY, A PURE HASH OF (seed, domain, step, child) — never
+        // a running stream. `ratchetChildPasses` carries the full argument; the part
+        // that matters here is that the retrigger lookahead calls this function for
+        // steps it is not emitting, so a stream's pull count would make prediction
+        // and emission disagree. Child 0 is never asked: its fate was already
+        // decided by the condition and probability checks above.
+        if (! ratchetChildPasses (data, stepIndex, child))
+            continue;
+
+        // COMPACTED: a suppressed child leaves no hole, so `notes[k]` is the k-th
+        // SURVIVOR and `positionInStep` — not the index — says where it sits.
+        StepNote& note = emission.notes[static_cast<std::size_t> (emission.noteCount)];
+
+        note.note = stepNote;
+        note.velocity = ratchetVelocity (stepVelocity, child, childCount, snapshot.ratchetVelocityRampPct);
+
+        // DERIVED INDEPENDENTLY FROM THE PARENT — `child / childCount`, one division,
+        // NOT `previousPosition + 1 / childCount`. Cumulative addition of a rounded
+        // slot drifts: at `childCount == 7` the slot is 822.857 samples at the
+        // canonical clock and child 6 ends up ~6 samples early.
+        note.positionInStep = static_cast<double> (child) / static_cast<double> (childCount);
+        note.gateFractionOfStep = childGateFraction;
+
+        // §5.4 provenance. Every note is `core`; only `child > 0` is a ratchet child
+        // (child 0 IS the step's onset). Phase 12 ORs its operator-slot bits in here.
+        note.provenance = provenance::core | (child > 0 ? provenance::ratchetChild : provenance::none);
+
+        ++emission.noteCount;
+    }
+
+    // Child 0 always survives (see above), so `noteCount >= 1` here — but assert it
+    // rather than assume it, because a future edit that makes child 0 conditional
+    // would otherwise produce a `gate == true` emission with nothing in it, which
+    // reads downstream as a step that fired silently rather than as a bug.
+    jassert (emission.noteCount >= 1);
+
+    // ── MICRO + SWING: COMPOSED HERE, CLAMPED ONCE, ON THE TOTAL ─────────────
+    // §12.1 stores MICRO as a percentage of the step, -50..+50, and says "swing
+    // applies on top" — so the composition is ADDITIVE with MICRO first.
+    //
+    // THE CLAMP IS ON THE SUM, AND CLAMPING PER SOURCE WOULD BE A DIFFERENT (AND
+    // WRONG) DESIGN. MICRO alone reaches ±0.5 and swing alone reaches +0.5, so two
+    // per-source clamps admit a composed ±1.0 — which BREAKS THE DERIVATION the
+    // step walk's scan widening rests on (`stepScanBack`/`stepScanForward` below
+    // are computed from `maxSubStepShiftSteps` and both bounds are ATTAINED, not
+    // padded). A composed displacement past 0.5 would place events in blocks the
+    // walk never visits, so they would vanish — uniformly at every buffer size,
+    // which is the one failure no cross-carving determinism test can see.
+    //
+    // THE SATURATION IS THEREFORE DELIBERATE AND AUDIBLE: at `swingPct 75`, MICRO
+    // +50 and MICRO 0 place an odd step on the SAME sample. That is documented
+    // behaviour (the golden `micro-swing-compose` bakes a saturating step in on
+    // purpose), not a rounding artefact.
+    //
+    // AND IT IS THE ONLY ENFORCEMENT POINT. `maxSubStepShiftSteps` is checked
+    // here, once, inside the pure core — so the walk, the retrigger lookahead and
+    // §9's offline pass all see a displacement that is already in range, and none
+    // of them has to re-clamp (a second clamp would be a second tolerance, which
+    // is the `ownsPpq` hazard one level up).
+    emission.shiftSteps =
+        juce::jlimit (-maxSubStepShiftSteps,
+                      maxSubStepShiftSteps,
+                      static_cast<double> (laneValueAt (laneOf (data, LaneId::micro), stepIndex)) / 100.0 +
+                          swingShiftSteps (snapshot.swingPct, stepIndex));
 
     return emission;
+}
+
+// RT-SAFE:
+std::int64_t SequencerProcessor::sampleForPpq (double ppq, std::int64_t blockStartSample) const noexcept
+{
+    // SNAP UP, THEN FLOOR — the two operations, written once (see the header). The
+    // walk's block clamp is deliberately NOT applied here: this function describes
+    // positions OUTSIDE the current block as readily as inside it, and the clamp is a
+    // separate decision the walk makes at its own call site (issue #37).
+    const double rawOffset = transport->blockOffsetForPpq (ppq);
+
+    return blockStartSample + static_cast<std::int64_t> (std::floor (rawOffset + sampleOffsetSnapSamples));
 }
 
 // RT-SAFE:
@@ -258,75 +556,161 @@ std::int64_t SequencerProcessor::stepBoundarySample (std::int64_t index,
                                                      double stepPpq,
                                                      std::int64_t blockStartSample) const noexcept
 {
-    // THE SAME two operations the step walk performs on a boundary — snap up, then
-    // floor — with the walk's block clamp deliberately omitted, because the point of
-    // this function is to describe boundaries OUTSIDE the current block. Callers must
-    // not use it to place an event; the walk owns in-block placement.
-    const double boundaryPpq = static_cast<double> (index) * stepPpq;
-    const double rawOffset = transport->blockOffsetForPpq (boundaryPpq);
-
-    return blockStartSample + static_cast<std::int64_t> (std::floor (rawOffset + sampleOffsetSnapSamples));
+    return sampleForPpq (static_cast<double> (index) * stepPpq, blockStartSample);
 }
 
 // RT-SAFE:
-std::int64_t SequencerProcessor::cutoffForSamePitch (std::int64_t stepIndex,
+std::int64_t SequencerProcessor::cutoffForSamePitch (const StepEmission& emission,
+                                                     std::int64_t stepIndex,
+                                                     int childIndex,
                                                      int channel,
                                                      int note,
                                                      std::int64_t onSample,
                                                      std::int64_t naturalDueSample,
                                                      double stepPpq,
                                                      std::int64_t blockStartSample,
-                                                     int lookaheadSteps) const noexcept
+                                                     int lookaheadSteps,
+                                                     StepRuntime runtime) const noexcept
 {
     if (activeSnapshot == nullptr || transport == nullptr || stepPpq <= 0.0)
         return naturalDueSample;
 
-    for (int ahead = 1; ahead <= lookaheadSteps; ++ahead)
+    // THE MINIMUM QUALIFYING ONSET, not the first one found. Until Phase 7.2 this
+    // loop returned on its first match and broke out at the first boundary past the
+    // note's end, both of which are only valid while onsets INCREASE MONOTONICALLY
+    // IN INDEX ORDER. Sub-step displacement breaks that: step k displaced by +0.5
+    // places its child 7 at k+1.375 while step k+1 displaced by -0.5 places its
+    // child 0 at k+0.5 — an inversion of 0.875 steps. So the whole bounded window is
+    // scanned, in BOTH directions, over `(index, child)` PAIRS, and the earliest
+    // qualifying onset wins.
+    std::int64_t earliestOnset = std::numeric_limits<std::int64_t>::max ();
+
+    for (int ahead = -retriggerScanBackSteps; ahead <= lookaheadSteps; ++ahead)
     {
         const std::int64_t index = stepIndex + ahead;
 
-        // STOP AT A RESOLVED PATTERN SWITCH. This scan passes `activePatternIndex`
-        // to `evaluateStep`, so from the adopt step onwards it would describe the
-        // OUTGOING pattern's lanes for steps the INCOMING pattern will play. Nothing
-        // is lost by stopping: `flushForPatternSwitch` releases this note at
-        // `adoptSample - 1` anyway, which is at or before any cutoff we could have
-        // found beyond the switch.
-        if (pendingResolved && index >= adoptStepIndex)
-            break;
-
-        const std::int64_t boundary = stepBoundarySample (index, stepPpq, blockStartSample);
-
-        // THE BOUND. Boundaries increase monotonically, so once one lies past the
-        // note's natural end no later one can shorten it. This is what makes the scan
-        // cost ~ceil(LEN%) iterations rather than unbounded.
-        if (boundary > naturalDueSample)
-            break;
-
-        // THE PREDICTION. `evaluateStep` is a free function taking exactly the three
-        // things a step depends on, so peeking at a FUTURE index here cannot disturb
-        // (or be disturbed by) the emitting walk — see issue #53 in the header.
-        const StepEmission next = evaluateStep (*activeSnapshot, activePatternIndex, index);
-
-        if (! next.gate)
+        // STOP SHORT OF A RESOLVED PATTERN SWITCH, FORWARD. This scan passes
+        // `activePatternIndex` to `evaluateStep`, so from the adopt step onwards it
+        // would describe the OUTGOING pattern's lanes for steps the INCOMING pattern
+        // will play. Nothing is lost by skipping: `flushForPatternSwitch` releases
+        // this note at `adoptSample - 1` anyway, which is at or before any cutoff we
+        // could have found beyond the switch.
+        //
+        // `continue`, NOT `break` — the loop no longer visits indices in a single
+        // direction, so terminating it here would also discard the backward band.
+        if (ahead > 0 && pendingResolved && index >= adoptStepIndex)
             continue;
 
-        // The SAME clamps `emitStep` applies below, so the comparison is against the
-        // pitch/channel that will actually be emitted rather than the raw lane value.
-        if (juce::jlimit (1, 16, next.channel) != channel || juce::jlimit (0, 127, next.note) != note)
+        // AND BACKWARD, THE MIRROR IMAGE. Below the last switch that actually FIRED,
+        // `activePatternIndex` is the wrong pattern for the step — it is the incoming
+        // one, and those steps were played by the outgoing one. See
+        // `lastFiredAdoptStepIndex` for why the pending-switch fields cannot answer
+        // this (they are cleared exactly when the switch fires).
+        if (ahead < 0 && index < lastFiredAdoptStepIndex)
             continue;
 
-        // §5.5's 1-sample gap, on the absolute timeline. `jmax` guards only the
-        // degenerate `samplesPerStep <= 1` case (unreachable: the coarsest supported
-        // combination, 1/32-triplet at 300 BPM / 44.1 kHz, still gives 735 samples),
-        // where it would otherwise schedule an off before its own on.
-        return juce::jmax (onSample, boundary - 1);
+        // THE PREDICTION. `evaluateStep` is a free function taking exactly the four
+        // things a step depends on, so peeking at a NEIGHBOURING index here cannot
+        // disturb (or be disturbed by) the emitting walk — see issue #53 in the
+        // header.
+        //
+        // AT `ahead == 0` THE CALLER'S OWN EMISSION IS REUSED rather than
+        // re-evaluated. Purity means the two would agree, so this is not a
+        // correctness crutch — it saves the call, and it makes "a note and the
+        // prediction made on its behalf describe the same step" true by construction
+        // instead of true by argument.
+        //
+        // `runtime` IS THE CALLER'S LATCHED VALUE, threaded down rather than re-read
+        // from the member, so this prediction and the emission it predicts evaluate
+        // the FILL conditions against the identical flag.
+        const StepEmission candidate =
+            ahead == 0 ? emission : evaluateStep (*activeSnapshot, activePatternIndex, index, runtime);
+
+        if (! candidate.gate)
+            continue;
+
+        // The SAME clamp `emitNote` applies, so the comparison is against the channel
+        // that will actually be emitted rather than the raw snapshot value.
+        if (juce::jlimit (1, 16, candidate.channel) != channel)
+            continue;
+
+        // ON THIS STEP, ONLY THIS NOTE'S SUCCESSORS ARE CANDIDATES. A ratchet's
+        // children share a pitch, so child c+1 is what ends child c — this is where
+        // §5.5's 1-sample intra-ratchet gaps come from. Notes at or before
+        // `childIndex` are this note itself or its predecessors.
+        const int firstChild = ahead == 0 ? childIndex + 1 : 0;
+
+        for (int c = firstChild; c < candidate.noteCount; ++c)
+        {
+            const StepNote& candidateNote = candidate.notes[static_cast<std::size_t> (c)];
+
+            if (juce::jlimit (0, 127, candidateNote.note) != note)
+                continue;
+
+            // THE CANDIDATE'S *PLACED* ONSET — its step's grid position, displaced by
+            // its own `shiftSteps`, plus its own sub-step position. This is the reason
+            // MICRO and swing are read inside `evaluateStep` rather than out-of-band
+            // in the walk: a prediction made against the unshifted grid would be up to
+            // half a step wrong, and the note-off it schedules wrong by the same
+            // amount. Derived through `sampleForPpq`, THE one snap-then-floor, so this
+            // prediction and the walk's eventual placement of the same event cannot
+            // come from different arithmetic (issue #54) — and through the same
+            // `stepPpq`, so no second tolerance is introduced (see `ownsPpq`).
+            const double placedPpq =
+                (static_cast<double> (index) + candidate.shiftSteps + candidateNote.positionInStep) * stepPpq;
+            const std::int64_t onset = sampleForPpq (placedPpq, blockStartSample);
+
+            // Not in this note's future — it cannot end a note that starts at or after
+            // it. (Reachable under displacement, where an earlier index can place
+            // later and a later index earlier; a same-sample collision is left to
+            // `emitNote`'s retrigger branch, which the table's placement rule keeps
+            // from inverting.)
+            if (onset <= onSample)
+                continue;
+
+            // Past the note's natural end: it cannot SHORTEN the note, so it is not a
+            // candidate. This replaces the deleted monotonicity `break` — the same
+            // filter, applied per candidate instead of terminating the scan.
+            if (onset - 1 >= naturalDueSample)
+                continue;
+
+            earliestOnset = juce::jmin (earliestOnset, onset);
+        }
     }
 
-    return naturalDueSample;
+    if (earliestOnset == std::numeric_limits<std::int64_t>::max ())
+        return naturalDueSample;
+
+    // §5.5's 1-sample gap, on the absolute timeline. `jmax` guards the degenerate
+    // sub-sample-spacing case, which is unreachable: the tightest supported step is
+    // 735 samples (1/32-triplet at 300 BPM / 44.1 kHz) and its narrowest ratchet
+    // spacing is 735 / 8 = 91 samples, so the gap always has room. Without the guard
+    // that case would schedule an off before its own on.
+    return juce::jmax (onSample, earliestOnset - 1);
 }
 
 // RT-SAFE:
-void SequencerProcessor::emitStep (const StepEmission& emission,
+bool SequencerProcessor::discontinuedByPatternSwitch (std::int64_t index,
+                                                      double eventPpq,
+                                                      double stepPpq) const noexcept
+{
+    // TWO BOUNDARIES, BECAUSE A BLOCK CAN BE ON EITHER SIDE OF THE FIRING — and this
+    // is exactly the insufficiency of guarding on `lastFiredAdoptStepIndex` alone.
+    // Inside the block where the switch fires, the walk reaches the pre-switch index
+    // BEFORE the adopt index, so the flag is still unset there; the resolved-but-not-
+    // yet-fired switch is what has to answer. After the firing, `pendingResolved` has
+    // been cleared and the flag is what answers. Testing both makes the decision a
+    // property of the MUSIC (which step, which sample, which boundary) rather than of
+    // which block happens to be rendering — which is the whole of the fix.
+    if (eventReachesAdoptBoundary (index, eventPpq, lastFiredAdoptStepIndex, stepPpq))
+        return true;
+
+    return pendingResolved && eventReachesAdoptBoundary (index, eventPpq, adoptStepIndex, stepPpq);
+}
+
+// RT-SAFE:
+void SequencerProcessor::emitNote (const StepEmission& emission,
+                                   int childIndex,
                                    juce::MidiBuffer& midi,
                                    std::int64_t stepIndex,
                                    int offset,
@@ -334,14 +718,17 @@ void SequencerProcessor::emitStep (const StepEmission& emission,
                                    std::int64_t blockStartSample,
                                    int numSamples,
                                    double stepPpq,
-                                   double samplesPerStep) noexcept
+                                   double samplesPerStep,
+                                   StepRuntime runtime) noexcept
 {
-    if (! emission.gate)
+    if (! emission.gate || childIndex < 0 || childIndex >= emission.noteCount)
         return;
 
+    const StepNote& stepNote = emission.notes[static_cast<std::size_t> (childIndex)];
+
     const int channel = juce::jlimit (1, 16, emission.channel);
-    const int note = juce::jlimit (0, 127, emission.note);
-    const int velocity = juce::jlimit (1, 127, emission.velocity);
+    const int note = juce::jlimit (0, 127, stepNote.note);
+    const int velocity = juce::jlimit (1, 127, stepNote.velocity);
 
     // §5.5 overlap policy — same-pitch retrigger, THE SAFETY NET. In the normal case
     // this branch no longer decides anything: `cutoffForSamePitch` has already
@@ -368,6 +755,19 @@ void SequencerProcessor::emitStep (const StepEmission& emission,
     //     is true of every live edit). Closing it means re-deriving pending cutoffs
     //     on adoption, which is real work for a transient artefact of live editing;
     //     tracked rather than fixed.
+    //   - THE FILL FLAG MOVED (Phase 7.1) — the same shape as #50, one input over.
+    //     `runtime.fillHeld` is latched per block, so a pad 16 press or release
+    //     lands at a BLOCK HEAD. A cutoff predicted in block k against `fillHeld
+    //     == false` can be arrived at in block k+1 with the flag now true, and a
+    //     `FILL`-conditioned step the lookahead predicted as a rest then fires (or
+    //     the reverse). Identical consequences to #50, for identical reasons: it is
+    //     a wrong note LENGTH and never a hung note, because the off is already
+    //     scheduled and `SoundingNoteTable` owns it outright; and it is NOT a
+    //     determinism violation, because the flag can only change at a block head
+    //     and WHICH block head is decided by when the performer pressed the pad —
+    //     the same absolute sample at every buffer size, exactly as for a snapshot
+    //     adoption. Within one block the flag is constant, so prediction and
+    //     emission never disagree about it.
     //
     // TWO CASES, and conflating them is how the emitted stream becomes buffer-size
     // dependent (issue #36):
@@ -400,7 +800,27 @@ void SequencerProcessor::emitStep (const StepEmission& emission,
     // reordered emitDueNoteOffs would have run, step k's note did not yet exist.
     // Closing that would require per-step interleaving of the two walks. Keep the
     // ordering; fix the placement.
-    if (const int existing = sounding.find (channel, note); existing >= 0)
+    // ── `findStartedAtOrBefore`, NEVER `find` (ISSUE #77) ────────────────────
+    // An entry whose own note-ON is LATER than this one's is not a note this note is
+    // retriggering — it is a note that has not sounded yet, which the walk reached
+    // early because its emission order is INDEX order and sub-step displacement broke
+    // the correspondence with sample order. Retiring it produced a ZERO-LENGTH note
+    // whose existence depended on whether the two onsets shared a block, i.e. on the
+    // DEVICE BUFFER SIZE.
+    //
+    // MEASURED (the `ratchet-swing-retrigger` golden, 137 BPM / 44.1 kHz, RATCHET 8,
+    // swing 66 %, LEN 150 %, one-note pool): the note-on at 337 — step -1's child 6,
+    // reached before step 0's child 0 at sample 0 — had its off at 602 (correct, one
+    // sample before the same-pitch onset at 603) at blocks 32, 64, 96, 128, 256 and
+    // at 337 at blocks 480, 512, 1024, 2048, 4096. Five of ten agreed with the baked
+    // reference; the reference was right.
+    //
+    // Nothing is lost by skipping it: the EARLIER note's own `cutoffForSamePitch` has
+    // already scheduled it to end before that later onset — the scan looks backward
+    // as well as forward and takes the minimum qualifying onset, which is exactly why
+    // the small-block carvings were already correct. See `findStartedAtOrBefore` in
+    // SoundingNoteTable.h, including what this costs the one-entry-per-pitch bound.
+    if (const int existing = sounding.findStartedAtOrBefore (channel, note, onSample); existing >= 0)
     {
         // BOTH CASES GO THROUGH ONE ABSOLUTE-SAMPLE CALL. `retireNoLaterThan` emits
         // at `min (the entry's own due sample, this cap)`, so the cap says only "the
@@ -420,21 +840,40 @@ void SequencerProcessor::emitStep (const StepEmission& emission,
     // Note length from the LEN-shaped gate fraction, resolved to samples at the
     // CURRENT tempo (see SoundingNoteTable.h on why the schedule is in samples). At
     // least one sample so a note can never be zero-length.
-    const double lengthInSamples = emission.gateFractionOfStep * samplesPerStep;
+    //
+    // `stepNote.gateFractionOfStep` IS ALREADY PER SLOT — `evaluateStep` divided LEN
+    // by the child count — so this multiplication is against the WHOLE step either
+    // way and needs no ratchet term of its own. At `noteCount == 1` the slot is the
+    // step and the arithmetic is bit-identical to Phase 6's.
+    const double lengthInSamples = stepNote.gateFractionOfStep * samplesPerStep;
     const std::int64_t lengthSamples =
         juce::jmax<std::int64_t> (1, static_cast<std::int64_t> (std::llround (lengthInSamples)));
 
-    // How far the lookahead has to reach, DERIVED FROM THIS NOTE rather than fixed:
-    // a note spanning L samples can only be cut short by a step inside those L
-    // samples, i.e. by roughly L / samplesPerStep steps. Computed in integers (the
-    // floor of `samplesPerStep` only ever makes the estimate larger, never smaller)
-    // so no float edge case can under-reach, then capped at
-    // `maxRetriggerLookaheadSteps`. See that constant for where 5 comes from.
+    const std::int64_t naturalDueSample = onSample + lengthSamples;
+
+    // How far the lookahead has to reach, DERIVED FROM THIS NOTE rather than fixed.
+    //
+    // MEASURED FROM THE STEP'S OWN *UNSHIFTED* GRID BOUNDARY, which is the Phase 7.2
+    // change and the reason this is not simply `lengthSamples / stepSamplesFloor`.
+    // The scan enumerates INDICES relative to `stepIndex`, so the reach it needs is
+    // the distance from that index's grid position to the end of this note — a span
+    // that already contains the step's displacement (up to ±0.5 steps) AND the
+    // child's own sub-step position (up to +0.875), without either having to be
+    // named here. Naming them is what a future STRUM or a widened MICRO range would
+    // silently invalidate.
+    //
+    // Computed in integers (the floor of `samplesPerStep` only ever makes the
+    // estimate larger, never smaller) so no float edge case can under-reach. `+ 2`
+    // rather than `+ 1`: one for the floor, and one because the CANDIDATE step may
+    // itself be displaced up to half a step EARLIER, so an index just past the
+    // reach can still place a note inside it. Then capped at
+    // `maxRetriggerLookaheadSteps`, which bounds all of this from the lane ranges.
     const auto stepSamplesFloor = static_cast<std::int64_t> (samplesPerStep);
+    const std::int64_t reachSamples = naturalDueSample - stepBoundarySample (stepIndex, stepPpq, blockStartSample);
     const int lookaheadSteps =
         stepSamplesFloor >= 1
             ? static_cast<int> (
-                  juce::jlimit<std::int64_t> (1, maxRetriggerLookaheadSteps, lengthSamples / stepSamplesFloor + 1))
+                  juce::jlimit<std::int64_t> (1, maxRetriggerLookaheadSteps, reachSamples / stepSamplesFloor + 2))
             : maxRetriggerLookaheadSteps;
 
     // THE ISSUE #46 FIX (see "EVERY NOTE-OFF IS SCHEDULED" in the header): decide the
@@ -442,18 +881,36 @@ void SequencerProcessor::emitStep (const StepEmission& emission,
     // let `SoundingNoteTable::emitDueNoteOffs` place it in whichever block contains
     // it, including the block BEFORE this one when the retrigger lands on a block
     // head. That is the placement `offset - 1` structurally could not express.
-    const std::int64_t dueOffSample = cutoffForSamePitch (stepIndex,
+    //
+    // FOR A RATCHET CHILD THIS IS ALSO WHERE THE INTRA-STEP GAP COMES FROM, and it
+    // needs no new mechanism: children share a pitch, so child c's next same-pitch
+    // onset is child c+1 of this same step, the scan finds it (`ahead == 0`,
+    // `c > childIndex`), and the off is scheduled at `onset(c+1) - 1`. When c+1
+    // reaches this function the table's `retireNoLaterThan` emits at that already
+    // scheduled sample and §5.5's 1-sample gap falls out of code that predates
+    // ratchets entirely.
+    const std::int64_t dueOffSample = cutoffForSamePitch (emission,
+                                                          stepIndex,
+                                                          childIndex,
                                                           channel,
                                                           note,
                                                           onSample,
-                                                          onSample + lengthSamples,
+                                                          naturalDueSample,
                                                           stepPpq,
                                                           blockStartSample,
-                                                          lookaheadSteps);
+                                                          lookaheadSteps,
+                                                          runtime);
 
     // Register BEFORE emitting: a full table must suppress the note-on, never leave an
     // untracked note sounding (SoundingNoteTable overflow policy).
-    if (! sounding.add (channel, note, dueOffSample))
+    //
+    // `onSample` IS PASSED SO THE TABLE KNOWS THIS NOTE'S OWN LOWER BOUND. Since the
+    // walk's emission order is no longer sample order (index order is, and
+    // displacement breaks the correspondence), a later-emitted note can start
+    // EARLIER than one already in the table, and a cap derived from it would
+    // otherwise place that entry's off BEFORE its own note-on — an inverted pair,
+    // i.e. a hung note at the synth. See "THE PLACEMENT RULE" in SoundingNoteTable.h.
+    if (! sounding.add (channel, note, onSample, dueOffSample))
         return;
 
     const juce::uint8 bytes[3] = { static_cast<juce::uint8> (0x90 | ((channel - 1) & 0x0F)),
@@ -517,6 +974,13 @@ bool SequencerProcessor::handleDiscontinuities (juce::MidiBuffer& midi,
     // one-shot design avoids: once `blockStartPpq` passes the target, the ceiling
     // jumps to the following bar and the switch outruns the playhead indefinitely.
     pendingResolved = false;
+
+    // FORGET THE LAST FIRED SWITCH TOO. It is a step index on the timeline this
+    // discontinuity has just broken (`transportStop` rewinds to PPQ 0), so keeping it
+    // would clamp the backward retrigger scan against a boundary that no longer names
+    // the same musical moment. The table is empty here, so nothing needs the bound
+    // right now — and by the time something does, a switch will have re-fired or not.
+    lastFiredAdoptStepIndex = std::numeric_limits<std::int64_t>::min ();
 
     return true;
 }
@@ -717,34 +1181,48 @@ void SequencerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
     // A stopped transport reports blockEndPpq() == blockStartPpq(), so the walk below
     // would produce an empty range anyway; the explicit guard just says so out loud.
+    // THE BLOCK'S LIVE (NON-SNAPSHOT) INPUTS, LATCHED ONCE, ABOVE THE WALK.
+    //
+    // Reading `fillHeld` per step instead would be OBSERVATIONALLY IDENTICAL today:
+    // the only writer is `applyCommand`, which runs during the transport head node's
+    // drain — strictly before this node renders — so the member cannot change while
+    // the walk below is running. It is latched anyway, for two reasons that are
+    // about the future rather than about today:
+    //
+    //   1. IT IS WHAT MAKES THE PURITY AMENDMENT TRUE. The Phase 7.1 note in the
+    //      header rests on the fourth input being const for the whole block and
+    //      passed IDENTICALLY to the lookahead and to the emission. A `const` local
+    //      makes that a property of the code rather than a property of the current
+    //      graph node ordering; the lookahead literally cannot see a different value
+    //      from the emission, because there is only one value.
+    //   2. THE DAY ANYTHING CAN DRAIN MID-BLOCK, per-step reads become a real bug —
+    //      a sub-block drain (for sample-accurate parameter automation, say) would
+    //      make step 3 and step 11 of one block evaluate FILL differently, and which
+    //      steps fell on which side would be a function of the device buffer size.
+    //      That is the #36 family, one input over. This line pre-empts it.
+    const StepRuntime runtime { fillHeld };
+
     if (transport->isPlaying () && ppqPerSample > 0.0)
     {
         const double samplesPerStep = curStepPpq / ppqPerSample;
 
         // Half-open [firstIndex, endIndex) with the SAME snapped ceiling applied to
         // both ends, so block k's endIndex equals block k+1's firstIndex exactly.
+        //
+        // AS OF PHASE 7.2 THESE ARE THE SCAN'S ORIGIN, NOT ITS DECISION. Ownership is
+        // decided per event by `ownsPpq` against the event's PLACED position; this
+        // pair only says where to start and stop LOOKING. See `stepScanBack` /
+        // `stepScanForward` for why the scan reaches two indices back and one forward,
+        // and why that widening is tight rather than generous.
         const std::int64_t firstIndex = snappedStepCeiling (transport->blockStartPpq (), curStepPpq);
         const std::int64_t endIndex = snappedStepCeiling (transport->blockEndPpq (), curStepPpq);
 
-        for (std::int64_t index = firstIndex; index < endIndex; ++index)
+        for (std::int64_t index = firstIndex - stepScanBack; index < endIndex + stepScanForward; ++index)
         {
-            const double boundaryPpq = static_cast<double> (index) * curStepPpq;
-
-            // Snap up before flooring (see sampleOffsetSnapSamples), then clamp hard
-            // into [0, numSamples). An out-of-range addEvent offset is a real hazard
-            // when a boundary lands on the block edge, and juce::MidiBuffer does not
-            // validate it — so the clamp is explicit rather than assumed.
-            //
-            // THE LOWER CLAMP IS ALSO THE #37 WINDOW. A boundary within
-            // `stepIndexSnapSteps` below this block's start was claimed by THIS block
-            // by the snapped ceiling, so `rawOffset` comes back slightly negative and
-            // the clamp emits it at 0 — up to one sample later than a carving that put
-            // it mid-block. That is the documented exception, not a defect to "fix" by
-            // deleting the clamp; see "THE SNAP-BOUNDARY WINDOW" in the header.
-            const double rawOffset = transport->blockOffsetForPpq (boundaryPpq);
-            const auto snapped = static_cast<std::int64_t> (std::floor (rawOffset + sampleOffsetSnapSamples));
-            const auto offset =
-                static_cast<int> (juce::jlimit<std::int64_t> (0, static_cast<std::int64_t> (numSamples) - 1, snapped));
+            // THE UNSHIFTED GRID POSITION of this step. The quantized pattern switch
+            // stays on it — a quantized apply is a control event, not musical content,
+            // and must not be dragged around by a swing or MICRO value.
+            const double gridPpq = static_cast<double> (index) * curStepPpq;
 
             // ── THE QUANTIZED PATTERN SWITCH LANDS HERE (§5.2, §6.1) ─────────
             // Inside the walk, at the resolved step's own sample offset, BEFORE that
@@ -760,40 +1238,190 @@ void SequencerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
             // half-open ranges tile the timeline exactly (block k's `endIndex` IS
             // block k+1's `firstIndex`, by construction), that later block visits it.
             //
+            // THE `ownsPpq` GUARD IS MANDATORY SINCE THE SCAN WAS WIDENED, and the
+            // failure it prevents is NOT a repeated switch — it is a STOLEN one.
+            // `stepScanForward` makes the block BEFORE the owner visit
+            // `adoptStepIndex` too, and firing is one-shot (`clearPendingSwitch`
+            // clears the request), so on the index test alone that earlier block fires
+            // first and the owner never fires at all. The pattern then changes up to
+            // one block early, at a sample decided by the DEVICE BUFFER SIZE — the #36
+            // shape again. (The scan-BACK band cannot steal it: those indices are
+            // below `firstIndex`, and `adoptStepIndex >= firstIndex` always holds for
+            // a resolved switch.)
+            //
+            // MEASURED, by deleting this guard: 9 tests red — pattern_switch's four
+            // quantize-mode literals, three of sequencer_offdeterminism's cross-block-
+            // size cases, the switch-flush table-empty assertion, and TWO GOLDENS.
+            //
+            // Only the owning block passes `ownsPpq (gridPpq)`, which is exactly the
+            // "is it mine" the index range used to express. Tested against `gridPpq`,
+            // NOT `placedPpq`, per the note above.
+            //
             // THE TEST IS ON THE INDEX, NOT ON THE EMISSION: the switch must fire even
             // when the adopt step is not gated, or a pattern whose target step happens
             // to be a rest would never switch.
-            const std::int64_t onSample = blockStartSample + static_cast<std::int64_t> (offset);
-
-            if (pendingResolved && index == adoptStepIndex)
+            if (pendingResolved && index == adoptStepIndex && ownsPpq (*transport, gridPpq, curStepPpq))
             {
+                // The adopt point on the absolute timeline, through THE ONE
+                // snap-then-floor, with the #37 lower clamp (see below) and nothing
+                // else — the same value the walk used to hand it before the switch
+                // and the emission had separate positions to reason about.
+                const std::int64_t adoptSample =
+                    juce::jmax (blockStartSample, sampleForPpq (gridPpq, blockStartSample));
+
                 // Normally a no-op by now: the pre-flush below, or the switch-aware
                 // bound in `cutoffForSamePitch`, has already retired everything the
                 // outgoing pattern was holding. It still runs — the table, not an
                 // inference about the table, is what §5.5 requires to be empty.
-                flushForPatternSwitch (midi, onSample, blockStartSample, numSamples);
+                flushForPatternSwitch (midi, adoptSample, blockStartSample, numSamples);
                 activePatternIndex = pendingPatternIndex;
+
+                // REMEMBERED FOR THE BACKWARD RETRIGGER SCAN, and it must be recorded
+                // BEFORE `clearPendingSwitch` destroys the only copy of the index. See
+                // `lastFiredAdoptStepIndex`: from here on `activePatternIndex` is the
+                // INCOMING pattern, so steps below this point must not be evaluated
+                // against it.
+                lastFiredAdoptStepIndex = adoptStepIndex;
+
                 clearPendingSwitch ();
             }
 
-            // THE EMISSION CORE, called with exactly the three inputs it is allowed
-            // to see (issue #53). `activeSnapshot` can still be null here — nothing
-            // has been adopted yet — and a default `StepEmission` has `gate == false`,
-            // so `emitStep` no-ops, which is what the old null-check inside the core
-            // did. The switch above cannot have fired in that case either
-            // (`resolvePendingSwitch` returns early on a null snapshot).
-            const StepEmission emission =
-                activeSnapshot != nullptr ? evaluateStep (*activeSnapshot, activePatternIndex, index) : StepEmission {};
+            // THE EMISSION CORE, called with exactly the four inputs it is allowed
+            // to see (issue #53, and its Phase 7.1 amendment for `runtime`).
+            // `activeSnapshot` can still be null here — nothing has been adopted yet
+            // — and a default `StepEmission` has `gate == false` (and `shiftSteps
+            // == 0`), so nothing is placed and nothing is emitted, which is what the
+            // old null-check inside the core did. The switch above cannot have fired
+            // in that case either (`resolvePendingSwitch` returns early on a null
+            // snapshot).
+            //
+            // CALLED BEFORE THE OWNERSHIP TEST SINCE PHASE 7.2 STAGE 3, because the
+            // displacement that DECIDES ownership now comes out of the core. It is
+            // called for every scanned index, including the three the scan widening
+            // adds; that is ~3 extra pure table reads per block and it is what buys
+            // the lane-read discipline documented on `StepEmission::shiftSteps`.
+            const StepEmission emission = activeSnapshot != nullptr
+                                              ? evaluateStep (*activeSnapshot, activePatternIndex, index, runtime)
+                                              : StepEmission {};
 
-            emitStep (emission,
-                      midi,
-                      index,
-                      offset,
-                      onSample,
-                      blockStartSample,
-                      numSamples,
-                      curStepPpq,
-                      samplesPerStep);
+            // THE PLACED POSITION of this step's onset: the grid position displaced
+            // by the composed MICRO + swing shift, which `evaluateStep` has already
+            // clamped to ±`maxSubStepShiftSteps`.
+            //
+            // THE SEAM IS HERE, IN PPQ, NOT DOWN IN SAMPLES. A samples-side
+            // displacement would use the EMITTING block's `samplesPerStep`, so a
+            // tempo change landing between an event's home block and its emitting
+            // block would make the two blocks derive different absolute samples for
+            // the same event — and the ownership test would then drop it in both or
+            // duplicate it in both. A PPQ displacement is tempo-independent, and
+            // `Transport::reanchor` preserves the PPQ reached, so the tiling survives
+            // a re-anchor. It also leaves this expression BIT-IDENTICAL to `gridPpq`
+            // whenever `shiftSteps` is 0, which is what makes the pre-7.2 goldens the
+            // proof that stages 1-3 are behaviour-neutral.
+            const double placedPpq = gridPpq + emission.shiftSteps * curStepPpq;
+
+            // ── OWNERSHIP: DOES THIS BLOCK EMIT THIS EVENT? ──────────────────
+            // THE UPPER CLAMP THAT USED TO LIVE BELOW IS NOW THIS REJECT, and the two
+            // must never be conflated again. `jlimit`'s upper arm pinned an event past
+            // the block end to `numSamples - 1` — a position decided by the DEVICE
+            // BUFFER SIZE, which is the exact shape of issue #36. The event does not
+            // ── OWNERSHIP AND EMISSION ARE PER `(index, child)` ──────────────
+            // NOT PER STEP, since Phase 7.2 stage 4. A step's children sit at
+            // distinct sub-step positions and each belongs to whichever block
+            // CONTAINS it — which is emphatically not always the parent's block: at
+            // the worst supported step (a dotted quarter at 20 BPM / 192 kHz,
+            // 864 000 samples) child 7 is 756 000 samples and many blocks after
+            // child 0. So each child gets its own `ownsPpq` test, its own offset
+            // conversion and its own `emitNote`.
+            //
+            // `noteCount` IS 0 WHEN THE STEP DOES NOT FIRE, so an ungated or
+            // suppressed step simply runs this loop zero times — there is no
+            // separate gate test here, and the pattern switch above has already had
+            // its (deliberately emission-independent) chance to fire.
+            for (int child = 0; child < emission.noteCount; ++child)
+            {
+                // THE CHILD'S PLACED POSITION. `positionInStep` is a PPQ OFFSET
+                // INSIDE THE PARENT'S STEP, added to the parent's already-displaced
+                // position — NOT a position on a `stepPpq / noteCount` sub-grid with
+                // a snapped ceiling of its own. That distinction is the second of the
+                // two things forbidden in the header's sub-step geometry note: a
+                // per-child ceiling would be a SECOND tolerance evaluated at the same
+                // block edges as `ownsPpq`'s, which is precisely how two adjacent
+                // blocks come to disagree about who owns an event.
+                const double childPpq =
+                    placedPpq + emission.notes[static_cast<std::size_t> (child)].positionInStep * curStepPpq;
+
+                // ── IS THIS EVENT DISCONTINUED BY A PATTERN SWITCH? (#76) ────
+                // BEFORE the ownership test, deliberately: this question is about the
+                // MUSIC (does this note sound at or after the point its own pattern is
+                // discontinued) and must be answered identically in every block,
+                // including the blocks that do not own the event. Asking it after
+                // ownership would be observationally the same today and would invite a
+                // future reader to fold it into the ownership predicate, where it would
+                // acquire a dependence on the block.
+                if (discontinuedByPatternSwitch (index, childPpq, curStepPpq))
+                    continue;
+
+                // ── DOES THIS BLOCK EMIT THIS EVENT? ─────────────────────────
+                // THE UPPER CLAMP THAT USED TO LIVE BELOW IS NOW THIS REJECT, and the
+                // two must never be conflated again. `jlimit`'s upper arm pinned an
+                // event past the block end to `numSamples - 1` — a position decided by
+                // the DEVICE BUFFER SIZE, which is the exact shape of issue #36. The
+                // event does not belong to this block at all; the block that owns it
+                // emits it exactly.
+                //
+                // NO "ALREADY EMITTED" SET IS NEEDED, and adding one would be the
+                // cursor issue #53 forbids: `childPpq (index, c)` is a PURE function of
+                // the snapshot and the pair, the snapped half-open PPQ spans tile the
+                // timeline exactly, so each `(index, c)` is owned by exactly one block
+                // — and the scan widening guarantees that block visits it.
+                if (! ownsPpq (*transport, childPpq, curStepPpq))
+                    continue;
+
+                // THE ONE SNAP-THEN-FLOOR (`sampleForPpq`), then THE LOWER CLAMP,
+                // WHICH SURVIVES — it is a different thing entirely from the upper one
+                // above. It is the issue #37 window: a position within
+                // `stepIndexSnapSteps` below this block's start is claimed by THIS
+                // block by the snapped ceiling (and by `ownsPpq`, which is the same
+                // ceiling re-expressed), so the raw sample comes back slightly BELOW
+                // `blockStartSample` and the clamp emits it at offset 0 — up to one
+                // sample later than a carving that put it mid-block. That is the
+                // documented exception, not a defect to "fix" by deleting the clamp;
+                // see "THE SNAP-BOUNDARY WINDOW" in the header. NOTE that the window's
+                // HIT RATE is now up to ~8x what it was, because a step offers up to
+                // eight positions to be tested against block edges instead of one; its
+                // WIDTH is unchanged (it is denominated against the untouched grid).
+                const std::int64_t rawOffset = sampleForPpq (childPpq, blockStartSample) - blockStartSample;
+
+                // UNREACHABLE BY CONSTRUCTION, and kept as a structural net rather
+                // than an assumption: `ownsPpq` accepted, so `childPpq < blockEndPpq -
+                // snapPpq`, i.e. the raw offset is below `numSamples - snapSamples`
+                // where `snapSamples = 1e-6 x samplesPerStep >= 7.35e-4` (the tightest
+                // supported step is 735 samples). That margin exceeds
+                // `sampleOffsetSnapSamples` (1e-4), so the floor can never reach
+                // `numSamples`. An out-of-range `addEvent` offset is a real hazard and
+                // juce::MidiBuffer does not validate it, so the guard stays.
+                if (rawOffset >= static_cast<std::int64_t> (numSamples))
+                {
+                    jassertfalse; // ownership accepted an event this block cannot place
+                    continue;
+                }
+
+                const auto offset = static_cast<int> (juce::jmax<std::int64_t> (0, rawOffset));
+                const std::int64_t onSample = blockStartSample + static_cast<std::int64_t> (offset);
+
+                emitNote (emission,
+                          child,
+                          midi,
+                          index,
+                          offset,
+                          onSample,
+                          blockStartSample,
+                          numSamples,
+                          curStepPpq,
+                          samplesPerStep,
+                          runtime);
+            }
         }
     }
 

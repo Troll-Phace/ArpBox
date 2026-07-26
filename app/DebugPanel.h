@@ -3,6 +3,7 @@
 
 #include "AudioEngine.h"
 #include "SynthSlot.h"
+#include "engine/sequencer/PatternTypes.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -120,6 +121,32 @@ private:
     // a direct `PatternDocument` edit, never the command queue, and never from audio.
     void fillSelectedPattern ();
 
+    // ── Phase 7 step logic (DEV-ONLY) ────────────────────────────────────────
+
+    // MESSAGE-THREAD ONLY (DEV-ONLY): writes `value` into EVERY storage step of
+    // `lane` in the selected pattern, as ONE transaction — one undo entry and ONE
+    // snapshot build/publish for the whole gesture instead of 64 of each (see
+    // PatternDocument::beginTransaction). The DOCUMENT path (§3.4 channel 3), exactly
+    // like `fillSelectedPattern` — never the command queue, never from audio.
+    //
+    // UNIFORM ACROSS THE LANE IS THE POINT: one value everywhere makes a single §12.1
+    // feature audible on its own, instead of mixed into a hand-drawn contour nobody
+    // can hear through. All `maxSteps` STORAGE slots are written, not just the active
+    // `[0, length)` — matching `fillSelectedPattern`, so the value the sliders read
+    // back stays truthful if a lane is later lengthened.
+    void writeLaneUniform (engine::LaneId lane, int value);
+
+    // MESSAGE-THREAD ONLY (DEV-ONLY): re-reads the selected pattern's step-logic lane
+    // values (plus the project-level swing / ratchet ramp) back into the controls, so a
+    // control can never silently describe a different pattern than the one it writes.
+    // Called at construction and whenever `patternSelect` changes. Reads step 0 of each
+    // lane, which IS the whole lane's value while only this panel writes it.
+    void syncStepLogicControls ();
+
+    // MESSAGE-THREAD ONLY (DEV-ONLY): pushes the momentary FILL flag (§12.2 pad 16).
+    // A COMMAND (§3.4 channel 1), NOT a document edit — see `EngineCommandType::setFillHeld`.
+    void pushFillHeld (bool held);
+
     AudioEngine& audioEngine;              ///< Non-owning; owned by the application.
     hosting::PluginManager& pluginManager; ///< Non-owning; owned by the application.
     bool& scanForceKilledSink;             ///< App-owned; set true iff the scan worker was force-killed at teardown.
@@ -146,6 +173,48 @@ private:
     juce::ComboBox quantizeSelect; ///< instant | beat | bar | patternEnd.
     juce::TextButton switchPatternButton { "Queue Switch" };
     juce::TextButton fillPatternButton { "Make Audible" };
+
+    // ── Phase 7 step logic (DEV-ONLY; removed with this panel in Phase 15+) ───
+    // Without these the Phase 7 engine surface — ratchets, micro-timing, swing,
+    // probability, the 39 trig conditions and FILL — is UNREACHABLE from the app: the
+    // default document leaves every one of those lanes at `laneDefault`, which is
+    // precisely the "as if Phase 7 never landed" configuration. The real lane strip is
+    // Phase 16.3 and the real pad-16 FILL is Phase 17.3; this is the interim way to
+    // HEAR any of it.
+    //
+    // THREE DIFFERENT CHANNELS SIT IN THIS BLOCK — do not collapse them:
+    //   * Swing / ratchet ramp   → PROJECT-LEVEL document fields (one value, whole
+    //                              project — see the swing note in PatternTypes.h).
+    //   * RATCHET/MICRO/PROB/COND/MOD A → per-step LANES, written uniformly across the
+    //                              selected pattern. Also document edits.
+    //   * FILL                   → a momentary COMMAND (§3.4 channel 1). Not state.
+    //
+    // Every slider takes its bounds from `laneRange (…)` / the §8.1 swing + ramp
+    // constants rather than repeating a literal, so a range change in PatternTypes.h
+    // cannot silently desync this panel from what the engine accepts.
+    juce::Label stepLogicHeading;
+
+    juce::Slider swingSlider;                          ///< Project swing %, 50 (straight) .. 75.
+    juce::Label swingLabel { {}, "Swing %" };          ///< 50 = straight.
+    juce::Slider ratchetRampSlider;                    ///< Project ratchet velocity ramp %, -100..+100 (0 = flat).
+    juce::Label ratchetRampLabel { {}, "Ratch Ramp" }; ///< Applied to the LAST ratchet child.
+
+    juce::Slider ratchetLaneSlider;                    ///< RATCHET lane, laneRange = 1..8.
+    juce::Label ratchetLaneLabel { {}, "RATCHET" };    ///< Children per step.
+    juce::Slider microLaneSlider;                      ///< MICRO lane, laneRange = -50..+50 % step.
+    juce::Label microLaneLabel { {}, "MICRO %" };      ///< Swing composes on top.
+    juce::Slider probLaneSlider;                       ///< PROB lane, laneRange = 0..100 %.
+    juce::Label probLaneLabel { {}, "PROB %" };        ///< 100 consumes no randomness.
+    juce::Slider modALaneSlider;                       ///< MOD A lane, laneRange = 0..127.
+    juce::Label modALaneLabel { {}, "MOD A" };         ///< >= 64 is what NEI/!NEI reads (D7).
+    juce::ComboBox condSelect;                         ///< COND lane: all 39 §12.2 conditions.
+    juce::Label condLabel { {}, "COND" };              ///< Gates BEFORE the probability roll.
+    juce::TextButton fillHeldButton { "FILL (hold)" }; ///< MOMENTARY — pad 16, not a toggle.
+
+    /** Last FILL state pushed as a command. `Button::onStateChange` also fires for
+        hover transitions (buttonNormal ↔ buttonOver), which must not push a spurious
+        release; this de-duplicates so only real down/up edges reach the queue. */
+    bool fillHeldPushed = false;
 
     // ── On-screen / QWERTY keyboard (note input → engine note FIFO) ──────────
     juce::MidiKeyboardState keyboardState;

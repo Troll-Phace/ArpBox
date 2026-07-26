@@ -119,7 +119,7 @@ this format is not simply that byte stream hex-dumped.
 | `gridPpq` | no | step grid in quarter notes, for the reader |
 | `spanSamples` | no (advisory) | absolute samples the render covered |
 | `events` | **structurally** | cross-checked against the parsed body; a mismatch is a parse error (catches truncation) |
-| `rngVersion` | no | reserved at `0`. Phase 7.1 / Phase 12's versioned `RngStream` (§5.2) will use it, so those phases do not have to reformat every existing golden |
+| `rngVersion` | **per scenario** | **IN USE SINCE PHASE 7.** The six Phase-6 files are stamped `0` (no RNG existed in their audible path); Phase 7's six are stamped `1`. `determinism_goldens.cpp`'s inventory case checks each file against a per-scenario expectation table — the blanket `== 0` it used to carry became unsatisfiable the moment a second version existed, in the only two ways available: stamping the new files `0` (a lie about the schema they were produced under) or a spurious failure. Not part of the event comparison. |
 | `bakedAtBlockSize` | **NEVER** | see below |
 
 **`bakedAtBlockSize` is non-normative and must never be asserted on.**

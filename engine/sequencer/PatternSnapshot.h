@@ -39,8 +39,8 @@ namespace arpbox::engine
 // A pattern SWITCH (§6.1, quantized) is then an `int` change on the audio thread:
 // no pointer swap, no retirement, no lifetime question at a switch boundary. A
 // pointer swap happens only on a document EDIT. That collapses two independent
-// lifetime problems into one, and it is why `PatternSnapshot` is ~100 KB rather
-// than ~6 KB — the size buys the absence of a whole class of race.
+// lifetime problems into one, and it is why `PatternSnapshot` is ~120 KB rather
+// than ~8 KB — the size buys the absence of a whole class of race.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Longest GATE cycle in base steps: `length * division` at both maxima. Sizes
@@ -83,9 +83,35 @@ struct TraversalSet
 };
 
 /** One pattern as the audio thread reads it: the §12.1 lanes, already range-
-    clamped, plus the derived tables that make the step tick O(1) and STATELESS. */
+    clamped, plus the derived tables that make the step tick O(1) and STATELESS.
+
+    ── WHY `masterSeed` IS THE FIRST MEMBER ────────────────────────────────────
+    Padding, and a test that can see it. `masterSeed` is the only 8-byte-aligned
+    member of this struct; declared anywhere after `lanes` (whose alignment is 2)
+    it forces up to 6 bytes of interior padding, and declared last it forces
+    trailing padding instead. Leading is the one position that adds neither.
+
+    THAT MATTERS BECAUSE `tests/pattern_model_unit.cpp` COMPARES TWO INDEPENDENTLY
+    BUILT SNAPSHOTS WITH `memcmp` — padding included. That comparison is safe
+    (`std::make_unique<PatternSnapshot>()` VALUE-initializes, which zero-initializes
+    the whole object, padding and all, before the defaulted constructor runs — this
+    type has no user-provided constructor, only default member initializers), but
+    "safe because of a subtlety about value-initialization" is not something a
+    future member should have to rediscover. Minimising the padding in the first
+    place is the cheaper guarantee. Keep this member first. */
 struct PatternData
 {
+    /** §5.2 master seed, copied from `PatternState::masterSeed` at build time.
+
+        BEFORE PHASE 7.1 THE AUDIO THREAD COULD NOT REACH THIS VALUE: the seed was
+        consumed only on the message thread, to intern a `(mode, seed)` traversal
+        set (`PatternSnapshot.cpp`). The per-step PROB roll (§5.1 L2) needs it on
+        the RT path, so it rides the snapshot like every other datum the step tick
+        reads — never fetched from the document. See `rng::stepHash`.
+
+        DECLARED FIRST ON PURPOSE — see the padding note above. */
+    std::uint64_t masterSeed = 0;
+
     /** Range-clamped lane data, indexed by `LaneId` (§12.1). */
     std::array<LaneState, numLanes> lanes {};
 
@@ -119,7 +145,49 @@ struct PatternData
         A base step `p` is gated iff
         `p % gate.division == 0 && gate.values[p / gate.division] != 0`. */
     std::array<std::uint16_t, maxGatePeriodSteps> gatePrefixPulses {};
+
+    /** `previousGatedOffset[p]` = how many BASE STEPS BACK from gate-cycle phase
+        `p` the PREVIOUS gated step lies, wrapping around the cycle. Always in
+        `[1, gatePeriodSteps]` when the cycle contains at least one gated step, and
+        **0 when it contains none at all** — that zero is PRE's base case (§12.2
+        D6: a chain with no anchor decays to `false`, i.e. to silence).
+
+        WHAT IT IS FOR. `PRE`/`!PRE` are defined against the previous GATED step,
+        not the previous base step, so evaluating them needs to walk backwards
+        through the rhythm. Walking it live would be an O(period) scan per
+        evaluation on the audio thread, per link of a chain up to
+        `maxPreChainDepth` long, inside a lookahead that already evaluates several
+        future steps per emitted note. As a table it is one indexed read per link.
+
+        BUILT FROM THE SAME GATED PREDICATE `gatePrefixPulses` IS SUMMED FROM, in
+        the same function (`buildGatePrefix`), so the two tables cannot come to
+        disagree about what "gated" means — the same reasoning as the note on
+        `isGated`.
+
+        ── IT COSTS +16 KB ON THE SNAPSHOT ─────────────────────────────────────
+        512 phases x 2 bytes x 16 patterns. `PatternSnapshot` goes from 108,776
+        to 125,160 bytes (measured, arm64; Phase 7.2's two project-level doubles —
+        `swingPct` and `ratchetVelocityRampPct` — took it to 125,176). That is a
+        message-thread allocation on every
+        document rebuild (a piano-roll drag rebuilds on every mouse move), which is
+        why the BUILD is two linear passes over the cycle and never O(period^2).
+        A future table of this shape owes the same accounting. */
+    std::array<std::uint16_t, maxGatePeriodSteps> previousGatedOffset {};
 };
+
+// RT-SAFE: audio thread. Pure indexing.
+/** `data.lanes[lane]`, without the cast at every call site — the `PatternData`
+    sibling of `laneOf (const PatternState&, LaneId)` in PatternTypes.h. A
+    snapshot's lanes are the same array in a different struct.
+
+    AT NAMESPACE SCOPE, NOT PER-TRANSLATION-UNIT: it began as a private copy in
+    SequencerProcessor.cpp's anonymous namespace, and Phase 7.1 needs the identical
+    accessor in StepLogic.cpp. Two file-local copies of a lane accessor is exactly
+    the shape the `laneIndex` note in PatternTypes.h warns about, so there is one. */
+constexpr const LaneState& laneOf (const PatternData& data, LaneId lane) noexcept
+{
+    return data.lanes[static_cast<std::size_t> (lane)];
+}
 
 /** The immutable pattern set the audio thread reads for one adoption period
     (ARCHITECTURE §3.4 mechanism 3). Build with `buildPatternSnapshot`; publish
@@ -138,6 +206,17 @@ struct PatternSnapshot
     /** One pattern step in quarter notes (§8.1 `transport.grid`). PROJECT-LEVEL,
         not per pattern — see the note on `PatternState` in PatternTypes.h. */
     double gridStepPpq = 0.25;
+
+    /** Swing amount, 50..75 % (§8.1 `transport.swingPct`). PROJECT-LEVEL, beside
+        the grid and for the same §8.1 reason — see the swing note in
+        PatternTypes.h. Read by `evaluateStep` through `swingShiftSteps`
+        (sequencer/StepLogic.h); 50 displaces nothing at all. */
+    double swingPct = defaultSwingPct;
+
+    /** §5.1 L2 ratchet velocity ramp, -100..+100 % (0 = flat). PROJECT-LEVEL,
+        beside swing; read by `evaluateStep` through `ratchetVelocity`. At 0 — the
+        default — every child carries the step's own VEL untouched. */
+    double ratchetVelocityRampPct = defaultRatchetVelocityRampPct;
 
     /** Pattern active at transport start, 0..`maxPatterns`-1. */
     std::int32_t startPatternIndex = 0;
@@ -209,6 +288,46 @@ struct PatternSnapshot
         return isLaneTick (gate, globalStep) && laneValueAt (gate, globalStep) != 0;
     }
 
+    // RT-SAFE: audio thread. One floor-division.
+    /** WHICH PATTERN LOOP `globalStep` falls in, zero-based.
+        `loopIndexAt (data, 0) == 0` is the FIRST loop.
+
+        ── THIS IS THE ONE DEFINITION OF "A LOOP" (user decision D5) ───────────
+        §12.2's `A:B` cycles and `1ST`/`!1ST` are "pattern-loop-aware", and a
+        pattern has several defensible loop lengths: the GATE lane's cycle, the
+        lcm of all 11 lane cycles, a bar, the transport's own bar counter. D5 fixes
+        it as THE GATE LANE'S CYCLE (`gatePeriodSteps`) — the same quantity
+        `gatedOrdinal` below already divides by, and the same one
+        `QuantizeMode::patternEnd` resolves against, because GATE is the trig lane
+        and its repeat is what a listener hears as "the pattern looped".
+
+        `gatedOrdinal` CALLS THIS rather than repeating the division. That is the
+        point of putting it here: with one definition, "a loop means two different
+        things in this file" is not expressible. Do not inline it back.
+
+        FLOOR division, so a negative index gives loop -1, -2, … rather than
+        folding onto 0. The retrigger lookahead and the locate paths both evaluate
+        steps below 0 (`tests/step_purity.cpp` sweeps from -37), and truncating
+        division would make loops -1 and 0 the same loop — which `1ST` would then
+        report as "the first loop", twice as often as it exists. */
+    static std::int64_t loopIndexAt (const PatternData& data, std::int64_t globalStep) noexcept
+    {
+        return stepFloorDiv (globalStep, data.gatePeriodSteps > 0 ? data.gatePeriodSteps : 1);
+    }
+
+    // RT-SAFE: audio thread. One floor-division plus one table read.
+    /** How many BASE STEPS BACK from `globalStep` the previous gated step lies, or
+        0 when the pattern's GATE lane has no gated step at all (§12.2 D6's base
+        case — the caller must then treat the chain as unanchored). See
+        `PatternData::previousGatedOffset` for how the table is built. */
+    static std::int64_t previousGatedOffsetAt (const PatternData& data, std::int64_t globalStep) noexcept
+    {
+        const std::int64_t period = data.gatePeriodSteps > 0 ? data.gatePeriodSteps : 1;
+        const std::int64_t phase = globalStep - loopIndexAt (data, globalStep) * period;
+
+        return static_cast<std::int64_t> (data.previousGatedOffset[static_cast<std::size_t> (phase)]);
+    }
+
     // RT-SAFE: audio thread. One floor-divide plus one table read. No state.
     /** How many gated steps precede `globalStep` — i.e. WHICH pool note this step
         gets. Zero-based: the first gated step of the timeline returns 0.
@@ -245,7 +364,9 @@ struct PatternSnapshot
     std::int64_t gatedOrdinal (const PatternData& data, std::int64_t globalStep) const noexcept
     {
         const std::int64_t period = data.gatePeriodSteps > 0 ? data.gatePeriodSteps : 1;
-        const std::int64_t loop = stepFloorDiv (globalStep, period);
+        // THROUGH `loopIndexAt`, NOT A LOCAL FLOOR-DIVIDE — see D5 there. §12.2's
+        // conditions and this ordinal must count the same loops.
+        const std::int64_t loop = loopIndexAt (data, globalStep);
         const std::int64_t phase = globalStep - loop * period;
 
         return loop * static_cast<std::int64_t> (data.gatePulsesPerLoop) +

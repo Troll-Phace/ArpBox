@@ -34,16 +34,30 @@
 //     way a same-pitch onset finds the previous note still sounding.
 // Each was individually reasonable. The gap was BETWEEN them.
 //
-// ── THE GOVERNING PROPERTY ──────────────────────────────────────────────────
+// ── THE GOVERNING PROPERTY, AND THE ONE PLACE IT IS NOT ENOUGH ──────────────
 // For a fixed musical scenario the complete MIDI event stream — POSITIONS and
 // BYTES and EVENT COUNT — is identical at every block size, for EVERY path that
-// can emit a note-off. All three are asserted, not just the first: #48's
+// can emit a note-off.
+//
+// PHASE 7.2 ADDED A FAILURE MODE THAT PROPERTY CANNOT SEE. Once ownership is decided
+// on an event's PLACED position rather than its index, an event can be owned by NO
+// block (dropped) or by TWO (duplicated) — and because the geometry that decides
+// ownership does not depend on the carving, either happens IDENTICALLY AT EVERY BLOCK
+// SIZE. Ten matching renders of a stream with holes in it is what `sweepBlockSizes`
+// reports as clean. So H, J, K and L each additionally carry a LITERAL COUNT written
+// in this source, and L counts its four/four split at every size SEPARATELY; see
+// tests/substep_ownership.cpp, whose primary guard is that literal rather than a
+// sweep. All three are asserted, not just the first: #48's
 // divergence showed up as 309 events against 308, because a stale table entry
 // joined the CC123 sweep. A position-only comparison would have missed it. CC123
 // placement and count are additionally compared on their own, because the sweep is
 // the part of a flush that a position diff buries in the middle of a long stream.
 //
-// ── THE SEVEN SCENARIOS AND THE PATHS THEY COVER ────────────────────────────
+// ── THE TWELVE SCENARIOS AND THE PATHS THEY COVER ───────────────────────────
+// A..G are Phase 6's, about a note-off placed from a within-block OFFSET. H..L are
+// Phase 7.2's, about an event placed away from its own grid BOUNDARY — a different
+// mechanism with the same signature, and two of them found live defects.
+//
 //   A  natural gate-end (`emitDueNoteOffs`) + same-pitch retrigger, ALREADY-DUE
 //   B  same-pitch retrigger, STILL-SOUNDING (LEN 150 %, the #46 shape)
 //   C  MID-BLOCK quantized-switch flush over already-ended entries (the #48 shape)
@@ -53,6 +67,13 @@
 //      in combination
 //   G  EMISSION ORDER among offs sharing one sample (issue #51, found by this file
 //      while it was being written — see that case for the whole story)
+//   H  NEGATIVE displacement — an onset placed in the block BEFORE its own
+//   I  POSITIVE displacement past the block end — the deleted upper `jlimit`
+//   J  displaced onsets across a MID-RENDER TEMPO CHANGE, which is what
+//      discriminates the chosen PPQ-side displacement seam from a samples-side one
+//   K  eight ratchet children per step straddling block edges at LEN 150 %
+//   L  a displaced ratchet child reaching a quantized pattern switch — ISSUE #76,
+//      found by this case on its first run, in two distinct fingerprints
 //
 // A FOURTH DEFECT CAME OUT OF BUILDING THIS. #51 is not a misplaced sample: it is
 // two note-offs on ONE sample coming out in a buffer-size-dependent ORDER, because
@@ -848,6 +869,280 @@ int mixedDegree (int n) noexcept
 int mixedPitch (int n) noexcept
 {
     return poolPitches[mixedDegree (n)];
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PHASE 7.2: SUB-STEP DISPLACEMENT (cases H..L)
+//
+// ── WHY THE SEVEN CASES ABOVE DO NOT COVER THIS ─────────────────────────────
+// Every one of them places its events ON their grid boundaries, so ownership was
+// never in question: the step INDEX decided which block emitted an event and the
+// index range was a total, exact partition of the timeline. Phase 7.2 replaced that
+// with a widened scan plus a per-event PPQ predicate, and the failure modes changed
+// KIND rather than degree:
+//
+//   * A DROPPED event (owned by no block) and a DUPLICATED one (owned by two) happen
+//     IDENTICALLY AT EVERY BUFFER SIZE, because the geometry that decides ownership
+//     is the same at every buffer size. `sweepBlockSizes` compares ten renders
+//     against each other and CANNOT SEE EITHER. Cases H, J and K therefore carry a
+//     LITERAL NOTE-ON COUNT written in this source; that number, not the sweep, is
+//     what reddens.
+//   * The upper `jlimit` this phase deleted did the opposite: it pinned a positively
+//     displaced event to `numSamples - 1`, a position decided by the DEVICE BUFFER
+//     SIZE. That one IS a cross-size difference — issue #36's exact shape — and it
+//     is what case I is aimed at.
+//
+// ── ONE SHARED PROBE, DERIVED FROM THE ABSOLUTE STREAM ──────────────────────
+// The emitting block of an event is the block that CONTAINS it: `addEvent`'s offset
+// must lie in `[0, numSamples)`, so no other block could have placed it. That makes
+// "which block emitted this" a function of the absolute sample, and the whole
+// widening question answerable from `renderAt`'s stream without a block-by-block
+// driver. `wideningOf` below does exactly that, given a way to recover a note's step
+// INDEX from its onset — which each case supplies for its own geometry.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** `snappedStepCeiling` in exact integer arithmetic. For a non-negative integer
+    sample count the walk's `ceil (ppq / stepPpq - 1e-6)` is exactly this: the
+    tolerance only decides the answer when the quotient is already an integer, and
+    there both forms give the quotient. VALID ONLY AT A CONSTANT TEMPO — case J's
+    mid-render tempo change is why that case uses counts rather than this probe. */
+std::int64_t stepCeilingOf (std::int64_t sample) noexcept
+{
+    return (sample + stepSamples - 1) / stepSamples;
+}
+
+/** How a case recovers the STEP INDEX that produced a note-on, from the note's
+    absolute onset. Pure, per-geometry, and written in the test. */
+using IndexOfOnsetFn = std::int64_t (*) (std::int64_t);
+
+/** How many of a render's note-ons were emitted by a block whose own INDEX RANGE
+    does not contain their step index — i.e. how many were reachable ONLY because the
+    walk's scan was widened. Both directions counted separately.
+
+    AN UNATTAINED BOUND IS UNTESTED PADDING: if `below` (scan-back) or `above`
+    (scan-forward) is zero, the corresponding widening could be deleted and this file
+    would stay green. Every case using this REQUIREs its own side above zero. */
+struct WideningCount
+{
+    std::int64_t notes = 0;        ///< Note-ons classified.
+    std::int64_t below = 0;        ///< Index BELOW the emitting block's `firstIndex` (scan-back).
+    std::int64_t above = 0;        ///< Index at or above its `endIndex` (scan-forward).
+    std::int64_t unexplained = 0;  ///< Onsets the geometry cannot account for. MUST be 0.
+    std::int64_t deepestBelow = 0; ///< Most negative `index - firstIndex` seen.
+    std::int64_t deepestAbove = 0; ///< Largest `index - endIndex` seen.
+};
+
+WideningCount wideningOf (const MidiRenderResult& render, int blockSize, IndexOfOnsetFn indexOfOnset)
+{
+    WideningCount count;
+
+    for (const auto& event : render.events)
+    {
+        if (! event.message.isNoteOn ())
+            continue;
+
+        ++count.notes;
+
+        const std::int64_t onset = event.absoluteSample;
+        const std::int64_t index = indexOfOnset (onset);
+
+        if (index < 0)
+        {
+            ++count.unexplained;
+            continue;
+        }
+
+        const std::int64_t base = (onset / blockSize) * blockSize;
+        const std::int64_t firstIndex = stepCeilingOf (base);
+        const std::int64_t endIndex = stepCeilingOf (base + blockSize);
+
+        count.deepestBelow = std::min (count.deepestBelow, index - firstIndex);
+        count.deepestAbove = std::max (count.deepestAbove, index - endIndex);
+
+        if (index < firstIndex)
+            ++count.below;
+        else if (index >= endIndex)
+            ++count.above;
+    }
+
+    return count;
+}
+
+// ── H: MICRO -50 on every step — displacement into the PREVIOUS block ────────
+
+/** MICRO as a percentage of the step (§12.1: -50..+50). -50 is the maximum EARLY
+    displacement, and at 1200 samples per step it is exactly -600. */
+constexpr int earlyMicroPercent = -50;
+constexpr std::int64_t earlyShiftSamples = -600;
+
+void configureEarlyMicro (PatternDocument& document)
+{
+    document.beginTransaction ();
+    document.setGrid (offGridStepPpq);
+    gateOnWithPeriod (document, patternA, 16);
+    fillLane (document, patternA, LaneId::micro, earlyMicroPercent);
+    document.endTransaction ();
+}
+
+void configureEarlyMicroPerturbed (PatternDocument& document)
+{
+    configureEarlyMicro (document);
+    document.setLaneValue (patternA, LaneId::vel, 5, 101); // ONE lane value
+}
+
+/** Every onset is `1200n - 600`, so the index is exact. */
+std::int64_t indexOfEarlyOnset (std::int64_t onset) noexcept
+{
+    const std::int64_t shifted = onset - earlyShiftSamples;
+
+    return shifted % stepSamples == 0 ? shifted / stepSamples : -1;
+}
+
+// ── I: swing 75 + MICRO +50 on odd steps — displacement past the block END ───
+
+/** MICRO length 2: even steps undisplaced, odd steps at +50 % ON TOP of swing's
+    +0.5, which composes to 1.0 and CLAMPS to +0.5. The saturation is deliberate —
+    it is the largest displacement the geometry admits, so the `ownsPpq` reject is
+    exercised at its bound rather than near it. */
+constexpr int lateMicroLane[] = { 0, 50 };
+constexpr int lateMicroLaneLength = static_cast<int> (std::size (lateMicroLane));
+constexpr double lateSwingPct = 75.0;
+constexpr std::int64_t lateShiftSamples = 600;
+
+void configureLateMicro (PatternDocument& document)
+{
+    document.beginTransaction ();
+    document.setGrid (offGridStepPpq);
+    document.setSwing (lateSwingPct);
+    gateOnWithPeriod (document, patternA, 16);
+
+    document.setLaneLength (patternA, LaneId::micro, lateMicroLaneLength);
+    for (int step = 0; step < lateMicroLaneLength; ++step)
+        document.setLaneValue (patternA, LaneId::micro, step, lateMicroLane[step]);
+
+    document.endTransaction ();
+}
+
+void configureLateMicroPerturbed (PatternDocument& document)
+{
+    configureLateMicro (document);
+    document.setLaneValue (patternA, LaneId::vel, 5, 101);
+}
+
+/** Even steps sit on their boundary; odd steps 600 samples after it. */
+std::int64_t indexOfLateOnset (std::int64_t onset) noexcept
+{
+    if (onset % stepSamples == 0)
+        return onset / stepSamples;
+
+    const std::int64_t shifted = onset - lateShiftSamples;
+
+    return shifted % stepSamples == 0 ? shifted / stepSamples : -1;
+}
+
+// ── J: displaced steps across a MID-RENDER TEMPO CHANGE ─────────────────────
+
+/** MICRO length 4, `{+50, 0, -50, 0}`: displacement in BOTH directions and back to
+    zero, so the tempo change below is crossed by early, late and undisplaced steps
+    alike. Adjacent shifts never differ by a whole step, so no two onsets coincide. */
+constexpr int tempoMicroLane[] = { 50, 0, -50, 0 };
+constexpr int tempoMicroLaneLength = static_cast<int> (std::size (tempoMicroLane));
+
+/** Where the tempo changes: one alignment unit in, so it is a block HEAD at every
+    swept size and lands mid-step (PPQ 6.4 is step 51.2). */
+constexpr std::int64_t tempoChangeSample = alignmentUnit; // 61440
+
+/** The second tempo. HALVING it doubles `samplesPerStep` from 1200 to 2400, which is
+    the largest disagreement a samples-side displacement seam could produce. */
+constexpr double tempoAfterChange = 150.0;
+
+void configureTempoMicro (PatternDocument& document)
+{
+    document.beginTransaction ();
+    document.setGrid (offGridStepPpq);
+    gateOnWithPeriod (document, patternA, 16);
+
+    document.setLaneLength (patternA, LaneId::micro, tempoMicroLaneLength);
+    for (int step = 0; step < tempoMicroLaneLength; ++step)
+        document.setLaneValue (patternA, LaneId::micro, step, tempoMicroLane[step]);
+
+    document.endTransaction ();
+}
+
+void configureTempoMicroPerturbed (PatternDocument& document)
+{
+    configureTempoMicro (document);
+    document.setLaneValue (patternA, LaneId::vel, 5, 101);
+}
+
+/** Play at 300 BPM, change to 150 BPM at `tempoChangeSample`, stop at `musicEnd`. */
+std::vector<ScheduledCommand> playChangeTempoThenStop (std::int64_t musicEnd)
+{
+    return { ScheduledCommand { 0, engineCommand (EngineCommandType::setTempoBpm, offBpm) },
+             ScheduledCommand { 0, engineCommand (EngineCommandType::transportPlay) },
+             ScheduledCommand { tempoChangeSample, engineCommand (EngineCommandType::setTempoBpm, tempoAfterChange) },
+             ScheduledCommand { musicEnd, engineCommand (EngineCommandType::transportStop) } };
+}
+
+// ── K: RATCHET 8 straddling block edges at LEN 150 % ────────────────────────
+
+constexpr int ratchetChildren = 8;
+constexpr std::int64_t ratchetSlotSamples = stepSamples / ratchetChildren; ///< 150, exactly
+
+void configureRatchetStraddle (PatternDocument& document)
+{
+    document.beginTransaction ();
+    document.setGrid (offGridStepPpq);
+    setSinglePitchPool (document); // one pitch ⇒ every onset is a same-pitch retrigger
+    gateOnWithPeriod (document, patternA, 16);
+    fillLane (document, patternA, LaneId::ratchet, ratchetChildren);
+    fillLane (document, patternA, LaneId::len, tiedLenPercent);
+    document.endTransaction ();
+}
+
+void configureRatchetStraddlePerturbed (PatternDocument& document)
+{
+    configureRatchetStraddle (document);
+    document.setLaneValue (patternA, LaneId::vel, 5, 101);
+}
+
+/** Children sit at `1200n + 150c`, so the index is the onset's whole-step part. */
+std::int64_t indexOfRatchetOnset (std::int64_t onset) noexcept
+{
+    return onset % ratchetSlotSamples == 0 ? onset / stepSamples : -1;
+}
+
+// ── L: a displaced ratchet child crossing a quantized pattern switch ────────
+
+/** The one geometry in which an event belonging to a PRE-SWITCH step can sound AFTER
+    the adopt point. A step's own displacement is bounded by ±0.5, so step `S - 1`
+    can never reach `S`'s boundary on displacement alone; its LAST RATCHET CHILD sits
+    a further 7/8 of a step ahead, and 0.5 + 0.875 = 1.375 clears it comfortably. */
+constexpr int switchRatchetChildren = 8;
+constexpr int switchMicroPercent = 50;
+constexpr std::int64_t switchShiftSamples = 600;
+
+void configureSwitchCrossing (PatternDocument& document)
+{
+    document.beginTransaction ();
+    document.setGrid (offGridStepPpq);
+
+    for (const int index : { patternA, patternB })
+    {
+        gateOnWithPeriod (document, index, switchGatePeriod);
+        fillLane (document, index, LaneId::ratchet, switchRatchetChildren);
+        fillLane (document, index, LaneId::micro, switchMicroPercent);
+    }
+
+    fillLane (document, patternB, LaneId::vel, velocityB);
+
+    document.endTransaction ();
+}
+
+void configureSwitchCrossingPerturbed (PatternDocument& document)
+{
+    configureSwitchCrossing (document);
+    document.setLaneValue (patternA, LaneId::vel, 5, 101);
 }
 } // namespace
 
@@ -1774,4 +2069,703 @@ TEST_CASE ("determinism/note-off: a multi-note flush emits its offs in registrat
     const auto perturbed = renderAt (&configureDiscontinuityPerturbed, schedule, span, probeBlockSize);
     REQUIRE (! perturbed.empty ());
     REQUIRE (perturbed.toByteStream () != reference.toByteStream ());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H. NEGATIVE DISPLACEMENT — an event placed in the block BEFORE its own
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/note-off: MICRO -50 places every onset in the previous block, and none are lost",
+           "[midi-conformance][determinism]")
+{
+    // ── WHY THE SWEEP ALONE IS VACUOUS HERE, AND THE COUNT IS NOT ────────────
+    // MICRO -50 puts every onset half a step EARLY: `1200n - 600`. The block that
+    // contains such an event is EARLIER than the block its grid boundary falls in, so
+    // the walk only reaches it because `stepScanForward` makes the block visit index
+    // `endIndex`. Delete that widening and the event is owned by no block at all — and
+    // it is dropped IDENTICALLY AT EVERY BUFFER SIZE, because the geometry that
+    // decides ownership does not depend on the carving. Ten matching renders of a
+    // stream with holes in it is exactly what `sweepBlockSizes` reports as clean.
+    //
+    // So the load-bearing assertion in this case is the LITERAL 102, written here.
+    constexpr std::int64_t music = 2 * alignmentUnit; // 122880
+    constexpr std::int64_t span = 3 * alignmentUnit;  // 184320
+
+    // ── LITERALS, FROM FIRST PRINCIPLES ──────────────────────────────────────
+    // Onsets are at `1200n - 600` and the transport plays `[0, 122880)`:
+    //   n = 0   ⇒ -600, BEFORE the transport started. Legitimately not emitted: the
+    //             playhead is at PPQ 0 and there is no earlier block to own it.
+    //   n = 102 ⇒ 121800, the last one inside the span (n = 103 would be 123000).
+    constexpr int expectedOns = 102;
+    constexpr std::int64_t firstOnset = 600;   // 1200 * 1 - 600
+    constexpr std::int64_t lastOnset = 121800; // 1200 * 102 - 600
+    constexpr std::int64_t gateSamples = 600;  // LEN 50 % of 1200
+
+    REQUIRE (earlyShiftSamples == -600);
+    REQUIRE (firstOnset == stepSamples + earlyShiftSamples);
+    REQUIRE (lastOnset == 102 * stepSamples + earlyShiftSamples);
+    REQUIRE (lastOnset + gateSamples < music); // 122400 < 122880 ⇒ the table is EMPTY at the stop
+
+    const auto schedule = playThenStop (music);
+    REQUIRE (isHeadEverywhere (music));
+
+    const auto sweep = sweepBlockSizes (&configureEarlyMicro, schedule, span);
+
+    // 102 ons + 102 offs, and NO CC123 at all: every gate expired before the stop, so
+    // the flush finds an empty table and sweeps nothing.
+    REQUIRE_SWEEP_CLEAN (sweep, 2 * expectedOns, 0);
+
+    // ── THE ONSETS THEMSELVES, AS LITERALS ───────────────────────────────────
+    const auto render = renderAt (&configureEarlyMicro, schedule, span, probeBlockSize);
+    const auto ons = noteOnsOf (render);
+    const auto offs = noteOffsOf (render);
+    INFO (render.describe (10));
+
+    REQUIRE (static_cast<int> (ons.size ()) == expectedOns);
+    REQUIRE (ons.front ().absoluteSample == firstOnset);
+    REQUIRE (ons.back ().absoluteSample == lastOnset);
+    REQUIRE (containsEvent (render, firstOnset, noteOnCh1, poolPitches[1 % poolSize], velocityA));
+
+    // …and EVERY one of them, aggregated: onset `1200n - 600`, off 600 later.
+    int onsDisplaced = 0;
+    int offsAtGateEnd = 0;
+
+    for (std::size_t i = 0; i < ons.size (); ++i)
+    {
+        const auto index = static_cast<std::int64_t> (i) + 1; // n = 1 .. 102
+        onsDisplaced += (ons[i].absoluteSample == index * stepSamples + earlyShiftSamples) ? 1 : 0;
+        offsAtGateEnd += (offs[i].absoluteSample == ons[i].absoluteSample + gateSamples) ? 1 : 0;
+    }
+
+    REQUIRE (onsDisplaced == expectedOns);
+    REQUIRE (offsAtGateEnd == expectedOns);
+
+    // NOTHING lands on a grid boundary — the displacement really is applied to all of
+    // them, so a dropped MICRO term would put 102 note-ons back on multiples of 1200.
+    int onGrid = 0;
+    for (const auto& event : ons)
+        if (event.absoluteSample % stepSamples == 0)
+            ++onGrid;
+
+    REQUIRE (onGrid == 0);
+
+    // ── REACHABILITY: the FORWARD band really was needed ─────────────────────
+    // A negatively displaced event sits in a block whose index range STARTS ABOVE its
+    // index, so it is reached through `stepScanForward`. Required non-zero at every
+    // swept size, or the widening it depends on is untested padding.
+    int sizesWithForward = 0;
+    std::int64_t deepestAbove = 0;
+
+    for (const int blockSize : sweptBlockSizes)
+    {
+        const auto sized = renderAt (&configureEarlyMicro, schedule, span, blockSize);
+        const auto widening = wideningOf (sized, blockSize, &indexOfEarlyOnset);
+
+        sizesWithForward += widening.above > 0 ? 1 : 0;
+        deepestAbove = std::max (deepestAbove, widening.deepestAbove);
+
+        if (widening.unexplained > 0)
+            sizesWithForward = -1000; // forces the assertion below to fail, loudly
+    }
+
+    INFO ("sizes whose forward band produced notes: " << sizesWithForward << ", deepest above " << deepestAbove);
+    REQUIRE (sizesWithForward == numSweptBlockSizes);
+    REQUIRE (deepestAbove == 0); // `stepScanForward == 1` ⇒ index `endIndex` exactly
+
+    // ── NEGATIVE CONTROL: one lane value ⇒ a DIFFERENT stream ────────────────
+    const auto perturbed = renderAt (&configureEarlyMicroPerturbed, schedule, span, probeBlockSize);
+    REQUIRE (! perturbed.empty ());
+    REQUIRE (perturbed.toByteStream () != render.toByteStream ());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I. POSITIVE DISPLACEMENT PAST THE BLOCK END — the deleted upper `jlimit`
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/note-off: a positively displaced onset is emitted by the block that contains it",
+           "[midi-conformance][determinism]")
+{
+    // ── THE ONE FAILURE IN THIS FAMILY THAT *IS* A CROSS-SIZE DIFFERENCE ─────
+    // Before Phase 7.2 the walk clamped an out-of-block offset with
+    // `jlimit (0, numSamples - 1, …)`. Under displacement the upper arm pinned an
+    // event past the block's end to `numSamples - 1` — a position decided by the
+    // DEVICE BUFFER SIZE, i.e. issue #36 exactly. It is now an `ownsPpq` REJECT: the
+    // event belongs to a later block and that block places it precisely.
+    //
+    // THE LOWER CLAMP SURVIVES AND IS A DIFFERENT THING (it is the #37 window).
+    // Conflating the two is the single easiest way to reintroduce #36, which is why
+    // this case and case H are separate: H needs the reject at the START of a block, I
+    // needs it at the END.
+    //
+    // Restoring the upper pin makes 51 of the 103 onsets land at `numSamples - 1` of
+    // whichever block their GRID boundary fell in — a different absolute sample at
+    // nine of the ten swept sizes.
+    constexpr std::int64_t music = 2 * alignmentUnit; // 122880
+    constexpr std::int64_t span = 3 * alignmentUnit;  // 184320
+
+    // ── THE COMPOSITION, AND ITS SATURATION ──────────────────────────────────
+    // Odd steps carry MICRO +50 ON TOP of swing 75's +0.5, so the raw composition is
+    // 1.0 of a step and the clamp pins it at +0.5 = 600 samples. Even steps are
+    // undisplaced. That mixture is deliberate: the file then contains onsets both on
+    // and off the grid, so a term dropped from either side is visible.
+    constexpr int evenOns = 52; // n = 0, 2, … 102  (1200n < 122880)
+    constexpr int oddOns = 51;  // n = 1, 3, … 101  (1200n + 600 < 122880)
+    constexpr int expectedOns = evenOns + oddOns;
+    constexpr std::int64_t gateSamples = 600;
+
+    REQUIRE (expectedOns == 103);
+    REQUIRE (lateShiftSamples == 600);
+    REQUIRE (lateSwingPct == 75.0);
+
+    // The last EVEN step (n = 102, onset 122400) is still sounding at the stop, so
+    // there is exactly one CC123; the last odd one (121800) expires at 122400.
+    REQUIRE (102 * stepSamples + gateSamples > music); // 123000 > 122880
+    REQUIRE (101 * stepSamples + lateShiftSamples + gateSamples < music);
+
+    // ── AND ODD ONSETS ARE A BLOCK HEAD AT NO SWEPT SIZE ─────────────────────
+    // 1200n + 600 is an odd multiple of 600, and no odd multiple of 600 is divisible
+    // by 32 (600 mod 32 = 24, and 24k ≡ 0 mod 32 needs k ≡ 0 mod 4). So every
+    // displaced onset is strictly MID-BLOCK at all ten sizes, which means the
+    // `ownsPpq` reject is exercised at every size rather than at some — the stronger
+    // version of the case. The EVEN onsets do vary: 2400 is a head at 32, 64, 96 and
+    // 480 and mid-block at 128, 256, 512, 1024, 2048 and 4096, so the file also
+    // contains the mixed geometry.
+    REQUIRE (headCount (1200 + lateShiftSamples) == 0);
+    REQUIRE (headCount (3 * stepSamples + lateShiftSamples) == 0);
+    REQUIRE (headCount (2 * stepSamples) > 0);
+    REQUIRE (headCount (2 * stepSamples) < numSweptBlockSizes);
+
+    const auto schedule = playThenStop (music);
+    const auto sweep = sweepBlockSizes (&configureLateMicro, schedule, span);
+    REQUIRE_SWEEP_CLEAN (sweep, 2 * expectedOns + 1, 1);
+
+    const auto render = renderAt (&configureLateMicro, schedule, span, probeBlockSize);
+    const auto ons = noteOnsOf (render);
+    INFO (render.describe (10));
+
+    REQUIRE (static_cast<int> (ons.size ()) == expectedOns);
+
+    // Every onset, aggregated: even on its boundary, odd 600 samples after it.
+    int evenOnGrid = 0;
+    int oddDisplaced = 0;
+
+    for (const auto& event : ons)
+    {
+        if (event.absoluteSample % stepSamples == 0)
+        {
+            const auto index = event.absoluteSample / stepSamples;
+            evenOnGrid += (index % 2 == 0) ? 1 : 0;
+        }
+        else if ((event.absoluteSample - lateShiftSamples) % stepSamples == 0)
+        {
+            const auto index = (event.absoluteSample - lateShiftSamples) / stepSamples;
+            oddDisplaced += (index % 2 == 1) ? 1 : 0;
+        }
+    }
+
+    REQUIRE (evenOnGrid == evenOns);
+    REQUIRE (oddDisplaced == oddOns);
+
+    // Two literals: step 0 on its boundary, step 1 displaced to 1800.
+    REQUIRE (containsEvent (render, 0, noteOnCh1, poolPitches[0], velocityA));
+    REQUIRE (containsEvent (render, 1800, noteOnCh1, poolPitches[1], velocityA));
+
+    // ── REACHABILITY: the BACKWARD band really was needed ────────────────────
+    // A positively displaced event sits in a block whose index range ENDS BELOW its
+    // index, so it is reached through `stepScanBack`.
+    int sizesWithBack = 0;
+    std::int64_t deepestBelow = 0;
+
+    for (const int blockSize : sweptBlockSizes)
+    {
+        const auto sized = renderAt (&configureLateMicro, schedule, span, blockSize);
+        const auto widening = wideningOf (sized, blockSize, &indexOfLateOnset);
+
+        sizesWithBack += widening.below > 0 ? 1 : 0;
+        deepestBelow = std::min (deepestBelow, widening.deepestBelow);
+
+        if (widening.unexplained > 0)
+            sizesWithBack = -1000;
+    }
+
+    INFO ("sizes whose backward band produced notes: " << sizesWithBack << ", deepest below " << deepestBelow);
+    REQUIRE (sizesWithBack == numSweptBlockSizes);
+    REQUIRE (deepestBelow <= -1);
+
+    const auto perturbed = renderAt (&configureLateMicroPerturbed, schedule, span, probeBlockSize);
+    REQUIRE (! perturbed.empty ());
+    REQUIRE (perturbed.toByteStream () != render.toByteStream ());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// J. DISPLACED STEPS ACROSS A MID-RENDER TEMPO CHANGE — the seam, discriminated
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/note-off: displaced onsets survive a mid-render tempo change",
+           "[midi-conformance][determinism]")
+{
+    // ── THE CASE THAT DISCRIMINATES THE CHOSEN SEAM FROM THE REJECTED ONE ────
+    // Phase 7.2 applies the displacement in PPQ (`gridPpq + shiftSteps * stepPpq`),
+    // not in samples. The reason is exactly this scenario. A samples-side
+    // displacement would use the EMITTING block's `samplesPerStep`, and the walk's
+    // widened scan makes the blocks either side of a re-anchor BOTH visit the indices
+    // near it. Halving the tempo doubles `samplesPerStep` from 1200 to 2400, so the
+    // two blocks would derive absolute samples 60 000 apart for the same event — and
+    // `ownsPpq` would then either reject it in both (DROPPED) or accept it in both
+    // (DUPLICATED). Both happen identically at every buffer size, so the sweep cannot
+    // see them: the literal count below is the assertion.
+    //
+    // A PPQ displacement is tempo-independent, and `Transport::reanchor` preserves the
+    // PPQ reached, so the half-open spans keep tiling across the re-anchor.
+    constexpr std::int64_t music = 2 * alignmentUnit; // 122880
+    constexpr std::int64_t span = 3 * alignmentUnit;  // 184320
+
+    // ── THE COUNT, DERIVED IN PPQ (the only frame that survives the change) ──
+    // Segment 1: [0, 61440) at 300 BPM ⇒ 1/9600 PPQ per sample ⇒ PPQ 6.4 at the change.
+    // Segment 2: [61440, 122880) at 150 BPM ⇒ 1/19200 ⇒ PPQ 9.6 at the stop.
+    // A step's PLACED position is `(n + shift (n)) * 0.125` PPQ, so it is played iff
+    // `0 <= n + shift (n) < 76.8`:
+    //   n = 76 (MICRO +50 ⇒ +0.5) ⇒ 76.5  ✓ the last one
+    //   n = 77 (MICRO 0)          ⇒ 77.0  ✗
+    //   n = 78 (MICRO -50)        ⇒ 77.5  ✗
+    constexpr int expectedOns = 77;
+
+    REQUIRE (tempoChangeSample == alignmentUnit);
+    REQUIRE (isHeadEverywhere (tempoChangeSample));
+    REQUIRE (tempoAfterChange == offBpm / 2.0);
+
+    const auto schedule = playChangeTempoThenStop (music);
+    REQUIRE (scheduleIsBlockAligned (schedule, sweptBlockSizes[0]));
+    REQUIRE (isHeadEverywhere (music));
+
+    const auto sweep = sweepBlockSizes (&configureTempoMicro, schedule, span);
+
+    // 77 ons + 77 offs + 1 CC123: the last note (emitted at the slower tempo, so
+    // 1200 samples long) is still sounding when the stop flushes it.
+    REQUIRE_SWEEP_CLEAN (sweep, 2 * expectedOns + 1, 1);
+
+    const auto render = renderAt (&configureTempoMicro, schedule, span, probeBlockSize);
+    const auto ons = noteOnsOf (render);
+    INFO (render.describe (12));
+
+    REQUIRE (static_cast<int> (ons.size ()) == expectedOns);
+
+    // ── BOTH SIDES OF THE CHANGE CARRY DISPLACED NOTES ───────────────────────
+    // Anti-vacuity for the whole case: if every note were emitted before the change,
+    // or if the post-change half were undisplaced, the seam would not have been
+    // crossed by a displaced event at all.
+    int beforeChange = 0;
+    int afterChange = 0;
+    int displacedBefore = 0;
+    int displacedAfter = 0;
+
+    for (const auto& event : ons)
+    {
+        const bool before = event.absoluteSample < tempoChangeSample;
+        const bool onGrid = event.absoluteSample % stepSamples == 0;
+
+        beforeChange += before ? 1 : 0;
+        afterChange += before ? 0 : 1;
+
+        // Only the pre-change half has an integer samples-per-step, so "on the grid"
+        // is only a meaningful test there; after the change the step is 2400 samples
+        // and an undisplaced onset is a multiple of 2400.
+        if (before && ! onGrid)
+            ++displacedBefore;
+        if (! before && event.absoluteSample % 2400 != 0)
+            ++displacedAfter;
+    }
+
+    INFO ("before the change " << beforeChange << " (" << displacedBefore << " displaced), after " << afterChange
+                               << " (" << displacedAfter << " displaced)");
+
+    REQUIRE (beforeChange > 8);
+    REQUIRE (afterChange > 8);
+    REQUIRE (displacedBefore > 4);
+    REQUIRE (displacedAfter > 4);
+
+    // The first onset is displaced by half a step at the FIRST tempo: step 0 carries
+    // MICRO +50, so it sits at 600 rather than 0.
+    REQUIRE (ons.front ().absoluteSample == 600);
+
+    const auto perturbed = renderAt (&configureTempoMicroPerturbed, schedule, span, probeBlockSize);
+    REQUIRE (! perturbed.empty ());
+    REQUIRE (perturbed.toByteStream () != render.toByteStream ());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K. EIGHT RATCHET CHILDREN STRADDLING BLOCK EDGES AT LEN 150 %
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/note-off: eight ratchet children per step keep their samples at every block size",
+           "[midi-conformance][determinism]")
+{
+    // ── OWNERSHIP IS PER `(index, child)`, NOT PER STEP ──────────────────────
+    // A step's children sit 150 samples apart and span 1050 samples, so a single step
+    // is routinely carved across several blocks — five of them at block size 256, and
+    // thirty-three at 32. Each child gets its own `ownsPpq` test, its own offset
+    // conversion and its own `emitNote`; a per-STEP ownership test would emit all
+    // eight from the parent's block, at offsets a smaller buffer cannot even express.
+    //
+    // LEN 150 % is what makes the intra-step chain do work: each child wants 225
+    // samples inside a 150-sample slot, so every one of them is cut short at the next
+    // child's onset minus one. With ONE pool pitch the chain runs across step
+    // boundaries too, so `cutoffForSamePitch`'s `ahead == 0` band and its cross-step
+    // bands are both exercised on every note.
+    constexpr std::int64_t music = 2 * alignmentUnit; // 122880
+    constexpr std::int64_t span = 3 * alignmentUnit;  // 184320
+
+    REQUIRE (ratchetSlotSamples == 150);
+    REQUIRE (ratchetChildren * ratchetSlotSamples == stepSamples);
+
+    // ── THE COUNT, FROM FIRST PRINCIPLES ────────────────────────────────────
+    // Children are at `1200n + 150c` for c = 0..7, and the transport plays
+    // `[0, 122880)`: steps 0..101 contribute all eight (step 101's last child is at
+    // 122250), and step 102 contributes four (122400, 122550, 122700, 122850 — the
+    // fifth would be 123000).
+    constexpr int wholeSteps = 102;     // 0 .. 101
+    constexpr int lastStepChildren = 4; // step 102
+    constexpr int expectedOns = wholeSteps * ratchetChildren + lastStepChildren;
+
+    REQUIRE (expectedOns == 820);
+    REQUIRE (101 * stepSamples + 7 * ratchetSlotSamples < music);  // 122250 < 122880
+    REQUIRE (102 * stepSamples + 3 * ratchetSlotSamples < music);  // 122850 < 122880
+    REQUIRE (102 * stepSamples + 4 * ratchetSlotSamples >= music); // 123000 — outside
+
+    // A step's children really do straddle several blocks. Computed here rather than
+    // asserted as prose, so a future change to the slot geometry has to move the
+    // number.
+    int maxBlocksSpanned = 0;
+    for (const int blockSize : sweptBlockSizes)
+    {
+        const std::int64_t first = 10 * stepSamples;
+        const std::int64_t last = first + 7 * ratchetSlotSamples;
+        const auto spanned = static_cast<int> (last / blockSize - first / blockSize) + 1;
+        maxBlocksSpanned = std::max (maxBlocksSpanned, spanned);
+    }
+
+    INFO ("one step's children span up to " << maxBlocksSpanned << " blocks");
+    REQUIRE (maxBlocksSpanned >= 5);
+
+    const auto schedule = playThenStop (music);
+    const auto sweep = sweepBlockSizes (&configureRatchetStraddle, schedule, span);
+
+    // 820 ons + 820 offs + 1 CC123 (the last child, cut short at 122999, is still
+    // sounding when the stop flushes it).
+    REQUIRE_SWEEP_CLEAN (sweep, 2 * expectedOns + 1, 1);
+
+    const auto render = renderAt (&configureRatchetStraddle, schedule, span, probeBlockSize);
+    const auto ons = noteOnsOf (render);
+    const auto offs = noteOffsOf (render);
+    INFO (render.describe (12));
+
+    REQUIRE (static_cast<int> (ons.size ()) == expectedOns);
+    REQUIRE (offs.size () == ons.size ());
+
+    // ── ONSETS AND OFFS, BOTH AS CLOSED FORMS, BOTH AGGREGATED ──────────────
+    // `1200n + 150c` and `1200n + 150(c + 1) - 1`. The `- 1` is §5.5's gap, and it
+    // appears 819 times here — the 820th note is cut by the stop flush instead.
+    int onsAtSlot = 0;
+    int offsOneBeforeNext = 0;
+
+    for (std::size_t i = 0; i < ons.size (); ++i)
+    {
+        const auto index = static_cast<std::int64_t> (i) / ratchetChildren;
+        const auto child = static_cast<std::int64_t> (i) % ratchetChildren;
+
+        onsAtSlot += (ons[i].absoluteSample == index * stepSamples + child * ratchetSlotSamples) ? 1 : 0;
+
+        if (i + 1 < ons.size ())
+            offsOneBeforeNext += (offs[i].absoluteSample == ons[i + 1].absoluteSample - 1) ? 1 : 0;
+    }
+
+    REQUIRE (onsAtSlot == expectedOns);
+    REQUIRE (offsOneBeforeNext == expectedOns - 1);
+
+    // The last off is the stop flush's, at the stop sample.
+    REQUIRE (offs.back ().absoluteSample == music);
+    REQUIRE (sweepSamplesOf (render) == std::vector<std::int64_t> { music });
+
+    // Literals for the first step, so the closed form above has a checkable anchor.
+    REQUIRE (containsEvent (render, 0, noteOnCh1, poolPitches[0], velocityA));
+    REQUIRE (containsEvent (render, 149, noteOffCh1, poolPitches[0], 0x00));
+    REQUIRE (containsEvent (render, 150, noteOnCh1, poolPitches[0], velocityA));
+    REQUIRE (containsEvent (render, 1050, noteOnCh1, poolPitches[0], velocityA));
+
+    // ── REACHABILITY: children ARE emitted from blocks past their parent's ──
+    // A child at `1200n + 1050` sits in a block whose index range can begin above n,
+    // which is `stepScanBack`. Required at every swept size.
+    int sizesWithBack = 0;
+
+    for (const int blockSize : sweptBlockSizes)
+    {
+        const auto sized = renderAt (&configureRatchetStraddle, schedule, span, blockSize);
+        const auto widening = wideningOf (sized, blockSize, &indexOfRatchetOnset);
+
+        sizesWithBack += widening.below > 0 ? 1 : 0;
+
+        if (widening.unexplained > 0)
+            sizesWithBack = -1000;
+    }
+
+    INFO ("sizes whose backward band produced notes: " << sizesWithBack);
+    REQUIRE (sizesWithBack == numSweptBlockSizes);
+
+    const auto perturbed = renderAt (&configureRatchetStraddlePerturbed, schedule, span, probeBlockSize);
+    REQUIRE (! perturbed.empty ());
+    REQUIRE (perturbed.toByteStream () != render.toByteStream ());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// L. A DISPLACED RATCHET CHILD REACHING A QUANTIZED PATTERN SWITCH (issue #76)
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE ("determinism/note-off: a pre-switch step's children are suppressed at the adopt boundary at every "
+           "block size",
+           "[midi-conformance][determinism]")
+{
+    // ── THE CASE THAT FOUND ISSUE #76, AND NOW GUARDS ITS FIX ────────────────
+    // On its first run this case was RED at four of the ten swept sizes, on TWO
+    // distinct fingerprints of one root cause (300 BPM / 48 kHz, 1/32 grid, RATCHET 8,
+    // MICRO +50, `patternEnd` switch resolving to step 61 = sample 73200):
+    //
+    //   VELOCITY LEAKAGE   step 60's child 5 @73350 carried velocity 111 (pattern B)
+    //                      at blocks 32…256 and 100 (pattern A) at 480…4096
+    //   FLUSH OVERREACH    child 4's off at 73200 vs 73275, child 7's at 73650 vs
+    //                      73725 — `flushForPatternSwitch` reaching over notes that
+    //                      START at or after the adopt point
+    //
+    // Same music, different MIDI bytes, decided by the DEVICE BUFFER SIZE: a §1.2
+    // violation and the #36/#46/#48 family one level up, this time in the EMISSION
+    // walk rather than in a note-off placement.
+    //
+    // THE ROOT CAUSE. The walk calls
+    // `evaluateStep (*activeSnapshot, activePatternIndex, index, runtime)` for every
+    // scanned index. Once a quantized switch has FIRED, `activePatternIndex` is the
+    // INCOMING pattern — and `stepScanBack` makes later blocks re-visit index 60 to
+    // pick up its remaining children. Those children were then described by pattern B's
+    // lanes, and registered in a table the switch's flush had already emptied. Whether
+    // a given child was reached before or after the firing depended on whether its
+    // sample and the adopt sample shared a block, i.e. on the buffer size.
+    //
+    // ── THE FIX, AND THE FROZEN USER DECISION IT ENCODES ─────────────────────
+    // `SequencerProcessor::discontinuedByPatternSwitch` — ONE guard in the walk, which
+    // closes both fingerprints at once. A ratchet child of a pre-switch step whose
+    // onset REACHES THE ADOPT BOUNDARY IS SUPPRESSED. The pattern switch is a clean
+    // break, consistent with §5.5 already making it a flush point.
+    //
+    // THAT IS A USER DECISION AND IT IS FROZEN. The alternative — keeping the four late
+    // children — forces one of two things, and both are worse: a table that survives
+    // the flush (breaking §5.5's empty-table invariant and the `jassert` that checks
+    // it), or four co-located note-on/note-off pairs, which is issue #46's blemish
+    // reintroduced deliberately. Suppression is also why `flushForPatternSwitch` needed
+    // no change of its own: with no note starting at or after the adopt point, there is
+    // nothing for it to reach over.
+    //
+    // SO THE ASSERTIONS BELOW ENCODE THE SUPPRESSION, NOT THE ARTIFACT. The first draft
+    // of this case asserted all eight children present and four of them after the adopt
+    // point — those were measurements of the DEFECT, and they are now four (children
+    // 0..3), zero after the boundary, four from pattern A. Issue #76's body is
+    // self-contradictory on exactly this point: its *Suggested fix* code drops the
+    // children while its *Fixed looks like* says all eight are emitted. The Suggested
+    // fix won.
+    //
+    // ── THE ONLY GEOMETRY IN WHICH A PRE-SWITCH EVENT CAN REACH THE SWITCH ───
+    // A step's own displacement is bounded by ±0.5, so step `S - 1` can never reach
+    // step `S`'s boundary on displacement alone. Its ratchet children can: child 7
+    // sits a further 7/8 of a step ahead, and 0.5 + 0.875 = 1.375 clears the boundary
+    // by 0.375 of a step.
+    //
+    // Pattern A's GATE period is 61, so a `patternEnd` switch resolves to STEP 61 =
+    // sample 73200 — an ODD multiple of 1200, which is a block head at NO swept size
+    // (proved in this file's clock case), so the adopt point is strictly MID-BLOCK at
+    // all ten sizes. Step 60's children are at `72600 + 150c`, and children 4..7
+    // (73200, 73350, 73500, 73650) sit AT OR AFTER the adopt sample.
+    //
+    // FOUR THINGS MUST HOLD:
+    //   1. children 0..3 (before the boundary) are emitted, from whichever block
+    //      contains them, and carry the OUTGOING pattern's velocity — they are step
+    //      60's notes and step 60 belongs to pattern A, whatever block emits them;
+    //   2. children 4..7 (at or after the boundary) are emitted BY NO BLOCK AT ALL;
+    //   3. both of those hold at EVERY swept block size, individually — see the
+    //      per-size counters below for why stream equality alone is not enough;
+    //   4. the CC123 count and placement are unchanged across the sweep. #48's
+    //      signature was a spurious sweep appearing at some buffer sizes and not
+    //      others, and a position-only comparison buries it.
+    constexpr std::int64_t music = 2 * alignmentUnit; // 122880
+    constexpr std::int64_t span = 3 * alignmentUnit;  // 184320
+    constexpr std::int64_t switchCommandAt = alignmentUnit;
+    constexpr std::int64_t adoptSample = 61 * stepSamples; // 73200
+    constexpr std::int64_t lastPreSwitchStep = 60;
+
+    REQUIRE (switchGatePeriod == 61);
+    REQUIRE (headCount (adoptSample) == 0); // mid-block at all ten sizes
+    REQUIRE (switchShiftSamples == 600);
+    REQUIRE (switchRatchetChildren == 8);
+
+    // Children 4..7 of step 60 sit at or beyond the adopt point.
+    constexpr std::int64_t step60Base = lastPreSwitchStep * stepSamples + switchShiftSamples; // 72600
+    REQUIRE (step60Base == 72600);
+    REQUIRE (step60Base + 3 * ratchetSlotSamples < adoptSample);  // 73050 < 73200
+    REQUIRE (step60Base + 4 * ratchetSlotSamples == adoptSample); // 73200
+    REQUIRE (step60Base + 7 * ratchetSlotSamples > adoptSample);  // 73650
+
+    const std::vector<ScheduledCommand> schedule {
+        ScheduledCommand { 0, engineCommand (EngineCommandType::setTempoBpm, offBpm) },
+        ScheduledCommand { 0, engineCommand (EngineCommandType::transportPlay) },
+        ScheduledCommand { switchCommandAt, patternSwitchCommand (patternB, QuantizeMode::patternEnd) },
+        ScheduledCommand { music, engineCommand (EngineCommandType::transportStop) }
+    };
+
+    REQUIRE (scheduleIsBlockAligned (schedule, sweptBlockSizes[0]));
+
+    // ── WHAT THE STREAM CONTAINS, READ AT THE PROBE SIZE ────────────────────
+    const auto render = renderAt (&configureSwitchCrossing, schedule, span, probeBlockSize);
+    const auto ons = noteOnsOf (render);
+    INFO (render.describe (12));
+
+    // Anti-vacuity: both patterns played, and the switch actually landed.
+    const auto fromA = notesFromPattern (render, velocityA);
+    const auto fromB = notesFromPattern (render, velocityB);
+
+    INFO ("pattern A contributed " << fromA.size () << " note-ons, pattern B " << fromB.size ());
+    REQUIRE (! fromA.empty ());
+    REQUIRE (! fromB.empty ());
+
+    // FOUR-AND-FOUR: step 60's children 0..3 survive and carry pattern A's velocity;
+    // children 4..7 reach the adopt boundary and are SUPPRESSED. The literals are what
+    // the frozen suppression decision predicts, not inequalities that either semantic
+    // would satisfy — `== 4` and `== 0` are false under the pre-fix behaviour (which
+    // gave 8 and 4) and false under a hypothetical over-suppression (which would give
+    // 0 and 0).
+    constexpr int survivingChildren = 4;  // 72600, 72750, 72900, 73050 — all < 73200
+    constexpr int suppressedChildren = 4; // 73200, 73350, 73500, 73650 — all >= 73200
+
+    static_assert (survivingChildren + suppressedChildren == switchRatchetChildren);
+
+    int step60Children = 0;
+    int step60ChildrenFromA = 0;
+    int step60ChildrenAfterAdopt = 0;
+
+    for (int child = 0; child < switchRatchetChildren; ++child)
+    {
+        const std::int64_t onset = step60Base + child * ratchetSlotSamples;
+
+        for (const auto& event : ons)
+            if (event.absoluteSample == onset)
+            {
+                ++step60Children;
+                step60ChildrenFromA += event.message.getVelocity () == velocityA ? 1 : 0;
+                step60ChildrenAfterAdopt += onset >= adoptSample ? 1 : 0;
+            }
+    }
+
+    INFO ("step 60: " << step60Children << " children, " << step60ChildrenFromA << " from pattern A, "
+                      << step60ChildrenAfterAdopt << " at or after the adopt point");
+
+    REQUIRE (step60Children == survivingChildren);
+    REQUIRE (step60ChildrenAfterAdopt == 0);
+    REQUIRE (step60ChildrenFromA == survivingChildren);
+
+    // ── THE SUPPRESSION IS DETERMINISTIC, PER SIZE, NOT MERELY CONSISTENT ────
+    // A stream-equality sweep would be satisfied by suppressing all EIGHT children
+    // uniformly, or NONE of them uniformly — the two failure modes that look identical
+    // to a cross-carving comparison and identical to each other. So the split is
+    // counted at every swept size independently, and both halves are required.
+    //
+    // This is the same argument as `substep_ownership.cpp`'s literal note-on count: a
+    // decision made from the MUSIC (which step, which sample, which boundary) is the
+    // same decision in every carving, and the only way to see that is to look in each
+    // carving separately.
+    int sizesWithCorrectSplit = 0;
+    int sizesWithAnySuppressedChild = 0;
+    int sizesMissingASurvivor = 0;
+
+    for (const int blockSize : sweptBlockSizes)
+    {
+        const auto sized = renderAt (&configureSwitchCrossing, schedule, span, blockSize);
+
+        int survived = 0;
+        int leaked = 0;
+
+        for (int child = 0; child < switchRatchetChildren; ++child)
+        {
+            const std::int64_t onset = step60Base + child * ratchetSlotSamples;
+            const bool present =
+                containsEvent (sized, onset, noteOnCh1, poolPitches[lastPreSwitchStep % poolSize], velocityA);
+
+            if (onset < adoptSample)
+                survived += present ? 1 : 0;
+            else
+                leaked += present ? 1 : 0;
+        }
+
+        sizesWithCorrectSplit += (survived == survivingChildren && leaked == 0) ? 1 : 0;
+        sizesWithAnySuppressedChild += leaked > 0 ? 1 : 0;
+        sizesMissingASurvivor += survived < survivingChildren ? 1 : 0;
+    }
+
+    INFO ("sizes with the correct 4/0 split: " << sizesWithCorrectSplit
+                                               << ", sizes leaking a suppressed child: " << sizesWithAnySuppressedChild
+                                               << ", sizes missing a survivor: " << sizesMissingASurvivor);
+
+    REQUIRE (sizesWithCorrectSplit == numSweptBlockSizes);
+    REQUIRE (sizesWithAnySuppressedChild == 0); // the pre-fix leak, at any size
+    REQUIRE (sizesMissingASurvivor == 0);       // over-suppression, at any size
+
+    // ── THE SWEEP: THE WHOLE STREAM, THE COUNT, AND THE CC123s ──────────────
+    // `REQUIRE_SWEEP_CLEAN` compares the byte stream in emission AND canonical order,
+    // the event count, and the CC123 positions and count — all ten sizes against the
+    // first. The literals come from the render above so the sweep is anchored to a
+    // stream whose contents have already been asserted.
+    const auto expectedEvents = static_cast<std::int64_t> (render.events.size ());
+    const auto expectedSweeps = sweepSamplesOf (render).size ();
+
+    INFO ("probe render: " << expectedEvents << " events, " << expectedSweeps << " CC123, " << ons.size ()
+                           << " note-ons");
+
+    // ── EXACTLY ONE CC123, AND THE REASON IS A FIXTURE PROPERTY WORTH KNOWING ─
+    // The stop flush's, and ONLY the stop flush's. The SWITCH flush correctly emits no
+    // sweep here, and that is not an omission:
+    //
+    //   `SoundingNoteTable::flush` sweeps only the channels it actually CUT SHORT — a
+    //   note that already ended keeps its own sample and is deliberately left out of
+    //   the sweep (that asymmetry IS issue #48's fix). At the default LEN 50 % of a
+    //   150-sample ratchet slot a child is 75 samples long, so step 60's last surviving
+    //   child (on 73050) ends at 73125 — 75 samples BEFORE the adopt point at 73200.
+    //   Nothing is sounding when the switch fires, so nothing is cut short, so there is
+    //   no sweep.
+    //
+    // THE PRE-FIX RUN HAD TWO SWEEPS, AND THE SECOND ONE WAS THE ARTIFACT: it existed
+    // only because the suppressed children were being registered in a table the flush
+    // had already emptied. Asserting `>= 2` here — as the first draft did — would have
+    // frozen the defect's own side effect as the expectation.
+    //
+    // ── SO: A CASE THAT WANTS TO EXERCISE A GENUINE SWITCH-FLUSH SWEEP NEEDS
+    //    LEN > 100 %, so a note truly TIES ACROSS the adopt boundary ────────────
+    // Case L deliberately does NOT: its subject is which pattern owns a displaced
+    // child, and a note tying across the boundary would add a cut-short off at
+    // `adoptSample - 1` to every comparison and make the four/four split harder to
+    // read. Cases C, D and F are where the switch flush has real work — all three run
+    // LEN 150 % (`tiedLenPercent`) for exactly this reason, and case C's
+    // `offsBeforeMarkInMarkBlock` probe is the one that proves the flush's already-ended
+    // branch ran. What NO case combines is a tied note ACROSS a switch with RATCHET > 1;
+    // if that is ever wanted it belongs as a sibling of this case (same geometry, LEN
+    // 150 %), not as a change to this one.
+    REQUIRE (expectedSweeps == 1u);
+    REQUIRE (sweepSamplesOf (render) == std::vector<std::int64_t> { music });
+    REQUIRE (step60Base + 3 * ratchetSlotSamples + 75 < adoptSample); // 73125 < 73200
+
+    const auto perturbed = renderAt (&configureSwitchCrossingPerturbed, schedule, span, probeBlockSize);
+    REQUIRE (! perturbed.empty ());
+    REQUIRE (perturbed.toByteStream () != render.toByteStream ());
+
+    // ── KEPT LAST: THE ASSERTION THAT IS CURRENTLY RED ───────────────────────
+    // Same discipline as `tied-retrigger`'s final `sizesMatched` check. Everything
+    // above — the eight children, their pattern-A velocities at the probe size, the two
+    // CC123s, the negative control — is verified first, so when this reddens the report
+    // names the cross-size divergence rather than burying it among unchecked literals.
+    // See the banner at the top of this case for the measured divergence and the fix.
+    const auto sweep = sweepBlockSizes (&configureSwitchCrossing, schedule, span);
+    REQUIRE_SWEEP_CLEAN (sweep, expectedEvents, expectedSweeps);
 }
