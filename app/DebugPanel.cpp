@@ -3,6 +3,7 @@
 
 #include "engine/sequencer/PatternDocument.h"
 #include "engine/sequencer/PatternTypes.h"
+#include "engine/sequencer/StepLogic.h"
 #include "hosting/PluginManager.h"
 
 namespace arpbox::app
@@ -29,6 +30,50 @@ namespace
     // and progress always accumulates across relaunches.
     constexpr int kScanSaveTypeGrowth = 1;
     constexpr std::uint32_t kScanSaveMinIntervalMs = 1000;
+
+    /** The §12.2 display name of a trig condition, for the DEV-ONLY COND combo.
+
+        THE 30 `A:B` LABELS ARE DERIVED, NOT TYPED. `abCycleFor` (engine/sequencer/
+        StepLogic.h) is the engine's own ordinal→(a, b) decode and is `static_assert`ed
+        exhaustive over the whole A:B block, so routing the labels through it means the
+        combo cannot disagree with the engine about which ordinal is `3:4` — the exact
+        class of silent off-by-one issue #62 was about. Only the 8 named conditions and
+        `none` are spelled out, because those have no arithmetic to derive them from.
+
+        INDEXED, NOT SWITCHED. A `switch` over `TrigCondition` trips `-Wswitch-enum`
+        (warnings are errors here) unless all 39 enumerators are listed explicitly —
+        even beside a `default:` — which would mean typing out the 30 A:B cases the
+        first line exists to avoid. */
+    String trigConditionLabel (engine::TrigCondition cond)
+    {
+        if (const auto cycle = engine::abCycleFor (cond); cycle.b != 0)
+            return String (cycle.a) + ":" + String (cycle.b);
+
+        constexpr int firstNamed = static_cast<int> (engine::TrigCondition::first);
+        constexpr int numNamed = static_cast<int> (engine::TrigCondition::notNei) - firstNamed + 1;
+
+        // §12.2's 8 named conditions, in `TrigCondition` ordinal order from `first`.
+        static constexpr const char* namedLabels[numNamed] = { "1ST", "!1ST", "FILL", "!FILL",
+                                                               "PRE", "!PRE", "NEI",  "!NEI" };
+
+        // A too-LONG initialiser is already a compile error; this catches a too-SHORT
+        // one, which would otherwise zero-fill the tail into null `char*`s.
+        static_assert (namedLabels[numNamed - 1] != nullptr,
+                       "Every named TrigCondition from `first` to `notNei` needs a label here.");
+
+        const int ordinal = static_cast<int> (cond);
+
+        if (ordinal == static_cast<int> (engine::TrigCondition::none))
+            return "--";
+
+        if (const int named = ordinal - firstNamed; named >= 0 && named < numNamed)
+            return namedLabels[named];
+
+        // Unreachable while the caller stops at `numTrigConditions` and every ordinal
+        // below it is either `none`, A:B or named. A future append AFTER `notNei` lands
+        // here and shows its ordinal, so the missing label is visible, not a blank item.
+        return "cond " + String (ordinal);
+    }
 
     /** Maps a device-status level to a human-readable banner string. */
     String statusText (std::uint8_t status)
@@ -124,6 +169,98 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     addAndMakeVisible (fillPatternButton);
     fillPatternButton.onClick = [this] { fillSelectedPattern (); };
 
+    // Every Phase 7 control below writes to whatever `patternSelect` names, so a
+    // change of selection has to pull that pattern's actual values back into them.
+    patternSelect.onChange = [this] { syncStepLogicControls (); };
+
+    // ── Phase 7 step logic (DEV-ONLY; real UI is Phase 16.3 / 17.1) ───────────
+    // Project-level document fields first, then the uniform per-lane writes, then the
+    // momentary FILL command. Ranges come from the engine's own constants — never a
+    // literal repeated here (see the block comment in DebugPanel.h).
+    // The heading text is set by `syncStepLogicControls` because it NAMES the pattern
+    // the controls write — see the foot-gun note there.
+    addAndMakeVisible (stepLogicHeading);
+    stepLogicHeading.setColour (Label::backgroundColourId, Colours::darkslateblue);
+
+    addAndMakeVisible (swingLabel);
+    addAndMakeVisible (swingSlider);
+    // 50 is EXACTLY straight (`swingShiftSteps` returns bit-zero there), so say so in
+    // the readout rather than leaving the user to guess what the bottom of the range
+    // means.
+    //
+    // INSTALLED BEFORE `setRange`, WHICH IS NOT COSMETIC ORDERING. `setRange` clamps
+    // the slider's initial 0.0 up into the range and refreshes the text box on the way;
+    // the later `setValue (50)` is then a NO-OP (`Slider::setValue` early-returns when
+    // the value is unchanged) and refreshes nothing. A formatter attached after either
+    // call therefore would not appear until the user first MOVED the slider — so the
+    // one value that needs the annotation, the default, is the one value that would
+    // never show it. Verified on screen, not reasoned about: it read "50.0" until this
+    // moved above `setRange`.
+    swingSlider.textFromValueFunction = [] (double value)
+    { return value <= engine::minSwingPct ? String ("50 (straight)") : String (value, 1); };
+    swingSlider.setRange (engine::minSwingPct, engine::maxSwingPct, 0.5);
+    swingSlider.setValue (engine::defaultSwingPct, dontSendNotification);
+    swingSlider.onValueChange = [this] { audioEngine.patterns ().setSwing (swingSlider.getValue ()); };
+
+    addAndMakeVisible (ratchetRampLabel);
+    addAndMakeVisible (ratchetRampSlider);
+    ratchetRampSlider.setRange (engine::minRatchetVelocityRampPct, engine::maxRatchetVelocityRampPct, 1.0);
+    ratchetRampSlider.setValue (engine::defaultRatchetVelocityRampPct, dontSendNotification);
+    ratchetRampSlider.setTextValueSuffix (" %");
+    ratchetRampSlider.onValueChange = [this]
+    { audioEngine.patterns ().setRatchetVelocityRamp (ratchetRampSlider.getValue ()); };
+
+    // The four numeric lanes. Each slider's range IS `laneRange (lane)` — bounds are
+    // read from the engine, and the step is 1 because every §12.1 lane is integral.
+    const auto configureLaneSlider = [this] (Slider& slider, Label& label, engine::LaneId lane)
+    {
+        const auto range = engine::laneRange (lane);
+        addAndMakeVisible (label);
+        addAndMakeVisible (slider);
+        slider.setRange (range.lo, range.hi, 1.0);
+        slider.setValue (engine::laneDefault (lane), dontSendNotification);
+        slider.onValueChange = [this, &slider, lane] { writeLaneUniform (lane, roundToInt (slider.getValue ())); };
+    };
+
+    configureLaneSlider (ratchetLaneSlider, ratchetLaneLabel, engine::LaneId::ratchet);
+    configureLaneSlider (microLaneSlider, microLaneLabel, engine::LaneId::micro);
+    configureLaneSlider (probLaneSlider, probLaneLabel, engine::LaneId::prob);
+    configureLaneSlider (modALaneSlider, modALaneLabel, engine::LaneId::modA);
+
+    // COND: all 39 §12.2 conditions, in ordinal order. Item id == ordinal + 1, the
+    // same convention `quantizeSelect` uses (0 means "nothing selected" in a ComboBox).
+    addAndMakeVisible (condLabel);
+    addAndMakeVisible (condSelect);
+    for (int ordinal = 0; ordinal < engine::numTrigConditions; ++ordinal)
+        condSelect.addItem (trigConditionLabel (static_cast<engine::TrigCondition> (ordinal)), ordinal + 1);
+    condSelect.setSelectedId (static_cast<int> (engine::TrigCondition::none) + 1, dontSendNotification);
+    condSelect.onChange = [this]
+    {
+        const int ordinal = condSelect.getSelectedId () - 1;
+        if (ordinal < 0 || ordinal >= engine::numTrigConditions)
+            return; // nothing selected (id 0)
+
+        writeLaneUniform (engine::LaneId::cond, ordinal);
+    };
+
+    // FILL — MOMENTARY, deliberately not a ToggleButton. §12.2's FILL is pad 16 HELD,
+    // so the flag must follow the mouse button down AND up; `onClick` fires once per
+    // completed click and would latch the flag on forever.
+    //
+    // `onStateChange` + `isDown()` is the momentary hook: JUCE's `Button::updateState`
+    // only reports `buttonDown` while the mouse is BOTH down AND over the button, so
+    // dragging off a held button drops the flag on its own — which is what stops FILL
+    // latching permanently when the mouse leaves mid-press. (It also covers the
+    // keyboard press-and-hold path, via `isKeyDown`.) The state message additionally
+    // fires on plain hover transitions, hence the de-duplication.
+    addAndMakeVisible (fillHeldButton);
+    fillHeldButton.onStateChange = [this]
+    {
+        const bool held = fillHeldButton.isDown ();
+        if (held != fillHeldPushed)
+            pushFillHeld (held);
+    };
+
     // ── Simulate device loss (dev-only) ──────────────────────────────────────
     addAndMakeVisible (simulateLossButton);
     simulateLossButton.onClick = [this] { audioEngine.simulateDeviceLoss (); };
@@ -215,6 +352,12 @@ DebugPanel::DebugPanel (AudioEngine& engine, hosting::PluginManager& plugins, bo
     pushInt (engine::EngineCommandType::setLimiterEnabled, 1);
     pushInt (engine::EngineCommandType::setTestToneEnabled, 0);
     pushDouble (engine::EngineCommandType::setTempoBpm, engine::Transport::defaultBpm);
+    pushFillHeld (false);
+
+    // Pull the initially-selected pattern's step-logic values into the controls. The
+    // engine defaults already match `laneDefault`, but going through the same sync path
+    // the pattern-change handler uses means there is only ONE place that can be wrong.
+    syncStepLogicControls ();
 
     setSize (1280, 800);
 }
@@ -396,6 +539,103 @@ void DebugPanel::fillSelectedPattern ()
     document.endTransaction ();
 }
 
+// ── Phase 7 step logic (DEV-ONLY) ─────────────────────────────────────────────
+
+// MESSAGE-THREAD ONLY. A DOCUMENT edit (§3.4 channel 3 / §4's message-thread edit
+// flow), identical in kind to `fillSelectedPattern` — mutate the authoritative
+// `PatternDocument`, which rebuilds and republishes an immutable `PatternSnapshot`
+// that the audio thread adopts at its next block head. Never the command queue,
+// never touched from the audio thread, and no fourth cross-thread channel.
+//
+// THE TRANSACTION IS LOAD-BEARING, NOT TIDINESS. Without it a single slider tick
+// would push 64 undo entries and build+publish 64 ~120 KB snapshots, which is a
+// VISIBLE stutter while dragging and would flood the retirement queue that the
+// vblank drains (`refreshFromEngine`) — a dropped retirement is a leaked snapshot.
+// One transaction ⇒ one undo entry, one build, one publish, one retirement.
+void DebugPanel::writeLaneUniform (engine::LaneId lane, int value)
+{
+    const int patternIndex = patternSelect.getSelectedId () - 1;
+    if (patternIndex < 0 || patternIndex >= engine::maxPatterns)
+        return; // nothing selected (ComboBox id 0), or out of range
+
+    auto& document = audioEngine.patterns ();
+
+    document.beginTransaction ();
+
+    // `setLaneValue` takes the lane's STORAGE index (0..maxSteps-1) and CLAMPS the
+    // value into `laneRange (lane)` rather than rejecting it, so the loop cannot fail
+    // on a bound the slider and the engine disagree about. Writing all 64 slots (not
+    // just `[0, length)`) matches `fillSelectedPattern`: slots at or beyond the lane's
+    // length are stored and never played, so they cost nothing and keep the value the
+    // sliders read back truthful if the lane is later lengthened.
+    for (int step = 0; step < engine::maxSteps; ++step)
+        document.setLaneValue (patternIndex, lane, step, value);
+
+    document.endTransaction ();
+}
+
+// MESSAGE-THREAD ONLY. Read-only against the document — no edit, no publish.
+void DebugPanel::syncStepLogicControls ()
+{
+    const int patternIndex = patternSelect.getSelectedId () - 1;
+    if (patternIndex < 0 || patternIndex >= engine::maxPatterns)
+        return;
+
+    const auto& state = audioEngine.patterns ().state ();
+
+    // ── NAME THE PATTERN, BECAUSE THE DEFAULT SELECTION IS A FOOT-GUN ────────
+    // `patternSelect` defaults to pattern 1 — it was added in Phase 6 as the SWITCH
+    // TARGET — while the transport starts on `startPatternIndex` (pattern 0). So out of
+    // the box every control in this block writes a pattern that is NOT sounding, and a
+    // user who drags PROB to 0 expecting silence hears nothing change and concludes the
+    // control is broken. Spelling both indices out is the cheap fix; the honest fix is
+    // the real Phase 17 UI.
+    //
+    // ASCII ONLY: the em dash in `paint`'s title renders as mojibake in this panel's
+    // default font, so a heading that has to be READ uses hyphens and pipes.
+    //
+    // `startPatternIndex` is where the transport STARTS, not necessarily what is
+    // sounding right now — a queued switch (or a `patternEnd` chain) moves the audible
+    // pattern and nothing here can see that. `EngineSnapshot` carries no active-pattern
+    // field to read (engine/graph/EngineSnapshot.h), and adding one is a snapshot layout
+    // change owned by the sequencer, not this throwaway panel.
+    stepLogicHeading.setText ("PHASE 7 STEP LOGIC (dev)  |  writes pattern " + String (patternIndex) +
+                                  "  |  transport starts on pattern " + String (state.startPatternIndex),
+                              dontSendNotification);
+
+    // Project-level fields: NOT per pattern (see the swing / ramp notes in
+    // PatternTypes.h), so these two are the same whichever pattern is selected. Synced
+    // here anyway so one function is the whole answer to "do the controls match?".
+    swingSlider.setValue (state.swingPct, dontSendNotification);
+    ratchetRampSlider.setValue (state.ratchetVelocityRampPct, dontSendNotification);
+
+    // Per-lane: step 0 stands for the lane, because `writeLaneUniform` is the only
+    // thing that writes these lanes and it writes them uniformly. If a later phase
+    // gives the panel a non-uniform writer, this readback becomes a half-truth and
+    // needs to show a range instead.
+    const auto& pattern = state.patterns[static_cast<std::size_t> (patternIndex)];
+    const auto laneStep0 = [&pattern] (engine::LaneId lane) { return engine::laneOf (pattern, lane).values[0]; };
+
+    ratchetLaneSlider.setValue (laneStep0 (engine::LaneId::ratchet), dontSendNotification);
+    microLaneSlider.setValue (laneStep0 (engine::LaneId::micro), dontSendNotification);
+    probLaneSlider.setValue (laneStep0 (engine::LaneId::prob), dontSendNotification);
+    modALaneSlider.setValue (laneStep0 (engine::LaneId::modA), dontSendNotification);
+
+    // COND ordinals are clamped into `laneRange (cond)` on the way in, so this id
+    // always names a real item. `dontSendNotification` matters: a notified change here
+    // would re-enter `writeLaneUniform` and edit the pattern we are only reading.
+    condSelect.setSelectedId (laneStep0 (engine::LaneId::cond) + 1, dontSendNotification);
+}
+
+// MESSAGE-THREAD ONLY. A COMMAND (§3.4 channel 1), not document state — FILL changes
+// on both press AND release, and carrying it on `PatternSnapshot` would rebuild and
+// republish the whole document twice per pad tap (see `EngineCommandType::setFillHeld`).
+void DebugPanel::pushFillHeld (bool held)
+{
+    fillHeldPushed = held;
+    pushInt (engine::EngineCommandType::setFillHeld, held ? 1 : 0);
+}
+
 // ── Synth slot (DEV-ONLY) ─────────────────────────────────────────────────────
 
 // MESSAGE-THREAD ONLY. Repopulates the combo from the known-plugin list, keeping
@@ -463,12 +703,33 @@ void DebugPanel::paint (Graphics& g)
 }
 
 // MESSAGE-THREAD ONLY.
+//
+// ── TWO COLUMNS SINCE PHASE 7, AND IT HAD TO BECOME TWO ──────────────────────
+// The single vertical stack was already at exactly zero slack: summed against the
+// 800 px minimum window height (MainWindow's setResizeLimits) the Phase-6 rows left
+// the keyboard its 60 px floor and not a pixel more. Phase 7's controls add ~230 px,
+// which a one-column stack cannot absorb at the minimum size — the rows above would
+// be squeezed to zero height rather than the panel scrolling. So the readouts and the
+// existing controls take the left column, the synth slot and the Phase 7 block take
+// the right, and the keyboard keeps the full-width strip along the bottom.
 void DebugPanel::resized ()
 {
-    auto area = getLocalBounds ().reduced (12);
-    area.removeFromTop (28); // title strip
+    auto content = getLocalBounds ().reduced (12);
+    content.removeFromTop (28); // title strip
+
+    // On-screen / QWERTY keyboard: the full-width bottom strip, 60..96 px. Reserved
+    // BEFORE the columns are split so it can never be squeezed out by either of them.
+    // The floor keeps it playable at the minimum window size; extra height the user
+    // drags out widens it up to 96.
+    auto keyboardStrip = content.removeFromBottom (jlimit (60, 96, content.getHeight () / 5));
+    keyboard.setBounds (keyboardStrip.reduced (0, 4));
+
+    auto area = content.removeFromLeft (content.getWidth () / 2 - 8);
+    content.removeFromLeft (16); // gutter
+    auto rightColumn = content;
 
     const auto row = [&area] (int h) { return area.removeFromTop (h).reduced (0, 4); };
+    const auto rightRow = [&rightColumn] (int h) { return rightColumn.removeFromTop (h).reduced (0, 4); };
 
     statusBanner.setBounds (row (32));
     deviceLabel.setBounds (row (24));
@@ -535,30 +796,52 @@ void DebugPanel::resized ()
         cancelScanButton.setBounds (r.removeFromLeft (160));
     }
 
+    // ── RIGHT COLUMN ─────────────────────────────────────────────────────────
+
     // ── Synth slot (DEV-ONLY) ────────────────────────────────────────────────
-    area.removeFromTop (12);
-    synthList.setBounds (row (28));
+    synthList.setBounds (rightRow (28));
     {
-        auto r = row (28);
+        auto r = rightRow (28);
         loadSynthButton.setBounds (r.removeFromLeft (160));
         r.removeFromLeft (8);
         removeSynthButton.setBounds (r.removeFromLeft (160));
     }
     {
-        auto r = row (28);
+        auto r = rightRow (28);
         synthGainLabel.setBounds (r.removeFromLeft (90));
         synthGainSlider.setBounds (r);
     }
-    synthStatusLabel.setBounds (row (24));
+    synthStatusLabel.setBounds (rightRow (24));
 
-    // On-screen / QWERTY keyboard occupies the bottom strip, 60..96 px of WHATEVER
-    // THE ROWS ABOVE LEFT. Not a fixed 96 any more: the Phase-6 pattern row pushed the
-    // stack to within a few pixels of the 800 px minimum window height (MainWindow's
-    // setResizeLimits), and an over-tall keyboard would squeeze the rows above it to
-    // zero height rather than shrink itself. The floor keeps it playable at the
-    // minimum size; extra height the user drags out widens it up to the old 96.
-    area.removeFromTop (12);
-    keyboard.setBounds (area.removeFromBottom (jlimit (60, 96, area.getHeight ())));
+    // ── Phase 7 step logic (DEV-ONLY) ────────────────────────────────────────
+    // Grouped under a visible heading so it is obvious at a glance which controls
+    // belong to Phase 7 and which pattern they write.
+    rightColumn.removeFromTop (12);
+    stepLogicHeading.setBounds (rightRow (28));
+
+    const auto labelledRow = [&rightRow] (Label& label, Component& control)
+    {
+        auto r = rightRow (28);
+        label.setBounds (r.removeFromLeft (110));
+        control.setBounds (r);
+    };
+
+    labelledRow (swingLabel, swingSlider);
+    labelledRow (ratchetRampLabel, ratchetRampSlider);
+
+    rightColumn.removeFromTop (8);
+
+    labelledRow (ratchetLaneLabel, ratchetLaneSlider);
+    labelledRow (microLaneLabel, microLaneSlider);
+    labelledRow (probLaneLabel, probLaneSlider);
+    labelledRow (modALaneLabel, modALaneSlider);
+    {
+        auto r = rightRow (30);
+        condLabel.setBounds (r.removeFromLeft (110));
+        condSelect.setBounds (r.removeFromLeft (160));
+        r.removeFromLeft (12);
+        fillHeldButton.setBounds (r.removeFromLeft (160));
+    }
 }
 
 // MESSAGE-THREAD ONLY (vblank ~60 fps).
