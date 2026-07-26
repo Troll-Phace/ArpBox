@@ -54,6 +54,21 @@ Xcode toolchain does not ship them.
    - If a guard trips, the gate fails loudly instead of printing "0 warnings". A
      canary failure means the diagnostic format changed: fix the extractor's
      pattern (it prints the new format for you), never relax the check.
+   - **Verify against the build-tree state matrix when you change this gate.** Its
+     first CI run failed in G5 on a tree nobody had exercised cold (#89) — a guard
+     that fails closed on a *legitimate* state is as untrustworthy as one that
+     passes blindly, and "it degrades safely" is not evidence that it does not fire
+     spuriously. All four must exit 0 with all six guards reporting:
+
+     | State | Command | Notes |
+     |---|---|---|
+     | 1. nothing configured | `lint.sh warnings --fresh-tree` | deletes `build-tidy/`, configures, builds. **This is the acceptance test** (~3 min) |
+     | 2. configured, never built | `rm -rf build-tidy && cmake --preset tidy && lint.sh warnings` | the exact state CI runs in, and the one that failed |
+     | 3. warm | `lint.sh warnings` | ~10 s; the easy case, and the only one originally tested |
+     | 4. warm, borrowed object gone | `rm -f build-tidy/engine/CMakeFiles/arpbox_engine.dir/graph/*.o && lint.sh warnings` | G5 borrows an object's *flags*; proves it does not need the object |
+
+     States 1, 2 and 4 all exercise G5 against objects that do not exist, which is
+     legitimate: G5 runs *before* the build by design and needs no object.
    - `tests/` is out of scope (issue **#86**): the `arpbox_tests` target carries no
      `-W` flags at all, so claiming coverage there would be a false green. The
      exclusion is per-target — `app/SynthSlot.cpp` builds into both targets and is

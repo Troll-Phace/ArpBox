@@ -14,10 +14,12 @@
 #
 # Usage:
 #   lint.sh tidy [--reconfigure] [-j N]   clang-tidy over the ARPBOX sources (default)
-#   lint.sh warnings [--reconfigure] [-j N]
+#   lint.sh warnings [--reconfigure] [--fresh-tree] [-j N]
 #                                         COMPILER-warning gate: recompiles every
 #                                         ARPBOX translation unit and fails on any
-#                                         warning in our own sources (issue #79)
+#                                         warning in our own sources (issue #79).
+#                                         --fresh-tree deletes build-tidy/ first, which
+#                                         is the from-nothing acceptance test (#89)
 #   lint.sh format                        clang-format --dry-run --Werror (CHECK only)
 #                                         over tracked AND untracked-but-not-ignored
 #                                         sources (issue #58)
@@ -368,6 +370,20 @@ ${REPO_ROOT}/app/Main.cpp:8:3: error: an error is not a warning"
 #   <repo-relative source>  <build-dir-relative object>  <sentinel flags present, comma-joined>
 # A source compiled into two targets yields two lines (app/SynthSlot.cpp does: once
 # into ARPBOX with the warning flags, once into arpbox_tests without them).
+#
+# BOTH path fields are NORMALISED here, and the `output` one is load-bearing: CMake
+# writes that field build-dir-relative on some versions and ABSOLUTE on others (local
+# CMake 4.0.1 → relative; the macos-14 CI runner → absolute). Emitting it verbatim
+# broke the gate on CI in two places at once, and neither failure named the real cause:
+#   - G5 feeds it to `ninja -t commands`, whose target namespace is build-dir-relative.
+#     An absolute path is not a node name, so ninja answers "unknown target" — and it
+#     does so whether the object exists or not, which is why this was NEVER a
+#     cold-tree problem despite first appearing on a cold CI tree.
+#   - G3 joins it onto $TIDY_BUILD_DIR to delete and re-check each object. With an
+#     absolute value that yields nonsense, so `rm -f` removes nothing, the build is a
+#     no-op, and G3 then reports all 25 TUs as "not built".
+# Normalising once, here, fixes both; the assertion below refuses to hand a consumer a
+# path in the form that broke them, rather than letting it fail downstream.
 db_scope_entries() {
     local db="$TIDY_BUILD_DIR/compile_commands.json" dir_alt sentinels
     dir_alt="$(IFS='|'; echo "${SRC_DIRS[*]}")"
@@ -376,7 +392,8 @@ db_scope_entries() {
     # (macOS /usr/bin/awk) parses `unquote ($0)` as a concatenation and dies with
     # "can't read value of unquote; it's a function". So this block deliberately does
     # not follow the project's C++ space-before-paren style.
-    awk -v root="$REPO_ROOT/" -v phys="$REPO_ROOT_PHYS/" -v dirs="$dir_alt" -v sent="$sentinels" '
+    awk -v root="$REPO_ROOT/" -v phys="$REPO_ROOT_PHYS/" -v dirs="$dir_alt" -v sent="$sentinels" \
+        -v bld="$TIDY_BUILD_DIR/" -v bldphys="$REPO_ROOT_PHYS/${TIDY_BUILD_DIR##*/}/" '
         function unquote(line) { sub(/^[^:]*:[[:space:]]*"/, "", line); sub(/",?$/, "", line); return line }
         BEGIN { n = split(sent, S, ",") }
         /^\{/                                 { file = ""; out = ""; cmd = "" }
@@ -391,6 +408,18 @@ db_scope_entries() {
             else next                                  # outside the repo (JUCE, SDKs)
             if (rel !~ "^(" dirs ")/") next
             if (rel !~ /\.(cpp|mm)$/) next
+            # Normalise `output` into ninja target namespace (see the note above).
+            if (index(out, bld) == 1)          out = substr(out, length(bld) + 1)
+            else if (index(out, bldphys) == 1) out = substr(out, length(bldphys) + 1)
+            if (substr(out, 1, 1) == "/")
+            {
+                printf("error: compile-database `output` for %s is an absolute path outside\n", rel) > "/dev/stderr"
+                printf("       the build tree and cannot be mapped into ninja target namespace:\n") > "/dev/stderr"
+                printf("         %s\n", out) > "/dev/stderr"
+                printf("       G3 and G5 both need a build-dir-relative object path. Refusing to\n") > "/dev/stderr"
+                printf("       continue rather than fail downstream with a misleading message.\n") > "/dev/stderr"
+                exit 3
+            }
             # A bare `-w` disables EVERY warning, so it cancels each sentinel just as
             # surely as a targeted -Wno- does — and it would otherwise sail past a
             # presence-only check (issue #87). Matched as a whole token: `-Wall` and
@@ -471,6 +500,17 @@ warn_assert_sentinel_flags() {
 # silent loss this whole gate exists to prevent. A `default:` arm in the canary is
 # what keeps it -Wswitch-enum rather than the broader -Wswitch — i.e. the canary is
 # shaped exactly like the bug this cluster fixed.
+#
+# WHY IT RUNS BEFORE THE BUILD, and why a cold tree is a legitimate state for it
+# (#89). G5 needs no object file: it asks ninja for a compile COMMAND (a graph query
+# answered from build.ninja, which configure writes) and then compiles its own TU with
+# `-fsyntax-only`. So it works identically on a tree that has never been built, one
+# that is fully built, and one whose objects G3 has just deleted — verified across all
+# four states in SKILL.md. Keeping it before the build is therefore free correctness-
+# wise and worth real time: a format-drifted gate is caught in ~1 s instead of after a
+# three-minute build, every run, in CI. Moving it after the build would buy nothing and
+# cost that. What DID break on CI was never coldness — see db_scope_entries on the
+# `output` path form.
 #
 # The canary TU lives in the top-level tree of the entry whose flags it borrows, and
 # not under tests/ (out of scope, #86) or in $TMPDIR: the path shape IS the thing
@@ -594,22 +634,38 @@ CANARY
 }
 
 run_warnings() {
-    local reconfigure="no" jobs=""
+    local reconfigure="no" jobs="" fresh="no"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --reconfigure) reconfigure="yes"; shift ;;
+            --fresh-tree)  fresh="yes"; shift ;;
             -j) jobs="$2"; shift 2 ;;
             -j*) jobs="${1#-j}"; shift ;;
             *) echo "error: unknown warnings option '$1'" >&2; return 2 ;;
         esac
     done
 
+    # --fresh-tree reproduces CI's state-1 exactly: no build-tidy/ at all. This exists
+    # because the gate's first CI run failed in G5 on a tree nobody had ever tested
+    # cold, and "delete the tree and run the gate" is the acceptance test that would
+    # have caught it. Safe to automate: build-tidy/ is a derived tree this script
+    # configures itself, holds no source, and is regenerated below.
+    if [[ "$fresh" == "yes" ]]; then
+        echo "== --fresh-tree: removing $TIDY_BUILD_DIR (state 1: nothing configured) =="
+        rm -rf "$TIDY_BUILD_DIR"
+        reconfigure="yes"
+    fi
+
     ensure_compile_db "$reconfigure" || return 1
     check_db_coverage || return 1          # G0
     warn_parser_selftest || return 1      # G1
 
-    local entries
-    entries="$(db_scope_entries)"
+    local entries entries_status=0
+    entries="$(db_scope_entries)" || entries_status=$?
+    if [[ "$entries_status" -ne 0 ]]; then
+        echo "error: could not read the compile database (see above); no verdict." >&2
+        return 1
+    fi
     if [[ -z "$entries" ]]; then
         echo "error: no in-scope compile-database entries found under: ${SRC_DIRS[*]}" >&2
         echo "       Refusing to report 'no warnings' about nothing (try --reconfigure)." >&2
@@ -823,7 +879,7 @@ main() {
             done
             ;;
         -h|--help|help)
-            sed -n '3,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '3,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             ;;
         *) echo "error: unknown mode '$mode' (tidy|warnings|format|format-fix|format-file|tools)" >&2; return 2 ;;
     esac
